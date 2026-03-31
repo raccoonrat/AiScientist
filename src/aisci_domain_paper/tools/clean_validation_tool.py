@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from aisci_agent_runtime.subagents.base import SubagentOutput
+from aisci_agent_runtime.subagents.base import SubagentOutput, SubagentStatus
 from aisci_agent_runtime.tools.base import Tool
 from aisci_domain_paper.configs import DEFAULT_EXPERIMENT_CONFIG, EXPERIMENT_VALIDATE_TIME_LIMIT
 
@@ -28,10 +28,8 @@ class CleanReproduceValidationTool(Tool):
     def name(self) -> str:
         return "clean_reproduce_validation"
 
-    def execute(self, shell, refresh: bool = False, time_budget: int | None = None, **kwargs: Any) -> str:  # noqa: ARG002
+    def execute(self, shell, time_budget: int | None = None, **kwargs: Any) -> str:  # noqa: ARG002
         self.engine._ensure_workspace()
-        if self.engine.self_check_path.exists() and not refresh:
-            return "Final self-check report already exists at /home/agent/final_self_check.md."
 
         self.engine.trace.event(
             "clean_validation_started",
@@ -56,9 +54,7 @@ class CleanReproduceValidationTool(Tool):
         result = self._run_experiment_subagent(cleanup_summary, time_budget=time_budget)
         experiment_result = self._format_subagent_result(result)
 
-        passed = "failed" not in experiment_result.lower() and "error" not in experiment_result.lower()
-        if hardcoded_hits:
-            passed = False
+        passed = result.status == SubagentStatus.COMPLETED and not hardcoded_hits
         status = "passed" if passed else "failed"
 
         report = {
@@ -67,26 +63,14 @@ class CleanReproduceValidationTool(Tool):
             "hardcoded_path_hits": hardcoded_hits,
             "result": experiment_result,
         }
+        report_text = self._build_agent_report(
+            result=result,
+            cleanup_summary=cleanup_summary,
+            hardcoded_hits=hardcoded_hits,
+            experiment_result=experiment_result,
+        )
         self.engine.self_check_path.write_text(
-            "\n".join(
-                [
-                    "# Final Self-Check",
-                    "",
-                    f"- Status: **{status}**",
-                    f"- Hardcoded `/home/submission` Hits: {len(hardcoded_hits)}",
-                    "",
-                    "## Cleanup Summary",
-                    "",
-                    "```text",
-                    cleanup_summary or "(empty)",
-                    "```",
-                    "",
-                    "## Validation Result",
-                    "",
-                    experiment_result,
-                ]
-            ).rstrip()
-            + "\n",
+            report_text.rstrip() + "\n",
             encoding="utf-8",
         )
         self.engine.self_check_json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -97,7 +81,7 @@ class CleanReproduceValidationTool(Tool):
             phase="validate",
             payload={"status": status, "hardcoded_hits": len(hardcoded_hits)},
         )
-        return f"Final self-check {status}. Report: /home/agent/final_self_check.md"
+        return report_text
 
     def _run_experiment_subagent(self, cleanup_summary: str, *, time_budget: int | None) -> SubagentOutput:
         session = self.engine.state_manager.create_session("clean_val")
@@ -147,6 +131,77 @@ class CleanReproduceValidationTool(Tool):
             return f"{header}\n\nLog: {result.log_path}\n\n{body}"
         return f"{header}\n\n{body}"
 
+    def _build_agent_report(
+        self,
+        *,
+        result: SubagentOutput,
+        cleanup_summary: str,
+        hardcoded_hits: list[str],
+        experiment_result: str,
+    ) -> str:
+        status_map = {
+            "completed": "✅",
+            "failed": "❌",
+            "timeout": "⏰",
+        }
+        status_icon = status_map.get(result.status.value, "❓")
+        header = f"[Clean Reproduce Validation {status_icon}] ({result.num_steps} steps, {result.runtime_seconds:.1f}s)"
+
+        lines = [
+            header,
+            "",
+            "## Environment Cleanup",
+            cleanup_summary or "(no cleanup output)",
+            "",
+        ]
+        if hardcoded_hits:
+            lines.extend(
+                [
+                    "## Hardcoded Path Check",
+                    "The following hardcoded `/home/submission` references were found and must be removed for a portable run:",
+                    *[f"- {line}" for line in hardcoded_hits],
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Validation Results",
+                experiment_result,
+                "",
+            ]
+        )
+        if result.status.value == "completed" and not hardcoded_hits:
+            lines.extend(
+                [
+                    "## What's Next?",
+                    "If the validation looks good, you can safely call `submit()`. If the result is still suspicious, run a targeted `run_experiment(...)` before you stop.",
+                ]
+            )
+        elif hardcoded_hits:
+            lines.extend(
+                [
+                    "## What's Next?",
+                    "Treat the hardcoded path hits as a reproducibility failure. Remove the `/home/submission` assumptions, commit the fix, and re-run `clean_reproduce_validation()`. The next action should usually be `implement(mode=\"fix\", context=\"Remove hardcoded /home/submission paths\")`.",
+                ]
+            )
+        elif result.status.value == "failed":
+            lines.extend(
+                [
+                    "## What's Next?",
+                    "Treat this as a reproducibility failure. Use `implement(mode=\"fix\", context=\"<clean validation diagnosis>\")`, then re-run `clean_reproduce_validation()`.",
+                ]
+            )
+        elif result.status.value == "timeout":
+            lines.extend(
+                [
+                    "## What's Next?",
+                    "The clean validation timed out. Inspect the detailed log, reduce avoidable overhead, and validate again before submitting.",
+                ]
+            )
+        if result.log_path:
+            lines.extend(["", f"Detailed log: `{result.log_path}`"])
+        return "\n".join(lines).strip()
+
     def get_tool_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
@@ -156,7 +211,6 @@ class CleanReproduceValidationTool(Tool):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "refresh": {"type": "boolean"},
                         "time_budget": {"type": "integer"},
                     },
                     "additionalProperties": False,

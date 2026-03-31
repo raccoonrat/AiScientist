@@ -132,15 +132,12 @@ class PaperDomainAdapter:
                 "AISCI_OBJECTIVE": job.objective,
                 "AISCI_LLM_PROFILE": job.llm_profile,
                 "AISCI_ENABLE_ONLINE_RESEARCH": "true" if job.mode_spec.enable_online_research else "false",
-                "AISCI_ENABLE_GITHUB_RESEARCH": "true" if job.mode_spec.enable_github_research else "false",
                 "TIME_LIMIT_SECS": str(self._parse_duration(job.runtime_profile.time_limit)),
                 "AISCI_MAX_STEPS": os.environ.get("AISCI_MAX_STEPS", "80"),
                 "AISCI_REMINDER_FREQ": os.environ.get("AISCI_REMINDER_FREQ", "5"),
                 "LOGS_DIR": "/home/logs",
             }
         )
-        if os.environ.get("GITHUB_TOKEN"):
-            env["GITHUB_TOKEN"] = os.environ["GITHUB_TOKEN"]
         if job.mode_spec.enable_online_research and env.get("AISCI_API_MODE") == "responses":
             env["AISCI_WEB_SEARCH"] = "true"
         return env

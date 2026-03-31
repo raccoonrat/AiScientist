@@ -13,22 +13,27 @@ class PrioritizeTasksTool(Tool):
     def name(self) -> str:
         return "prioritize_tasks"
 
-    def execute(self, shell, refresh: bool = False, **kwargs: Any) -> str:  # noqa: ARG002
+    def execute(
+        self,
+        shell,  # noqa: ARG002
+        paper_analysis_dir: str = "/home/agent/paper_analysis",
+        rubric_path: str = "/home/paper/rubric.json",
+        focus_areas: str | None = None,
+        **kwargs: Any,  # noqa: ARG002
+    ) -> str:
         self.engine._ensure_workspace()
-        if self.engine.prioritized_path.exists() and self.engine.plan_path.exists() and not refresh:
-            prioritized_text = self.engine.prioritized_path.read_text(encoding="utf-8")
-            plan_text = self.engine.plan_path.read_text(encoding="utf-8")
-            return "\n\n".join(
-                [
-                    "Prioritized plan already exists at /home/agent/prioritized_tasks.md.",
-                    "",
-                    prioritized_text,
-                    "",
-                    plan_text,
-                ]
-            ).strip()
+        summary_path = shell.mapped(paper_analysis_dir) / "summary.md"
+        if not summary_path.exists():
+            return (
+                f"Error: Paper analysis not found at {paper_analysis_dir}/. "
+                "Please run read_paper first to generate the paper analysis files."
+            )
 
-        result = PrioritizationRunner(self.engine).run()
+        result = PrioritizationRunner(self.engine).run(
+            paper_analysis_dir=paper_analysis_dir,
+            rubric_path=rubric_path,
+            focus_areas=focus_areas,
+        )
         self.engine.trace.event(
             "subagent_finish",
             "prioritize_tasks completed.",
@@ -46,7 +51,20 @@ class PrioritizeTasksTool(Tool):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "refresh": {"type": "boolean"},
+                        "paper_analysis_dir": {
+                            "type": "string",
+                            "description": "Directory containing paper analysis files.",
+                            "default": "/home/agent/paper_analysis",
+                        },
+                        "rubric_path": {
+                            "type": "string",
+                            "description": "Path to rubric.json.",
+                            "default": "/home/paper/rubric.json",
+                        },
+                        "focus_areas": {
+                            "type": "string",
+                            "description": "Optional comma-separated areas to emphasize in the prioritization.",
+                        },
                     },
                     "additionalProperties": False,
                 },

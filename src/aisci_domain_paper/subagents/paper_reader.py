@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
+from aisci_agent_runtime.llm_client import create_llm_client
 from aisci_agent_runtime.subagents.base import SubagentOutput, SubagentStatus
 from aisci_domain_paper.configs import (
     DEFAULT_PAPER_READER_CONFIG,
@@ -18,19 +19,8 @@ from aisci_domain_paper.prompts.templates import (
     SYNTHESIS_SYSTEM_PROMPT,
 )
 from aisci_domain_paper.subagents.base import PaperSubagent
+from aisci_domain_paper.subagents.coordinator import SubagentCoordinator, SubagentTask
 from aisci_domain_paper.tools import build_reader_tools
-
-
-class PaperReaderSubagent(PaperSubagent):
-    @property
-    def name(self) -> str:
-        return "paper_reader"
-
-    def system_prompt(self) -> str:
-        return self.engine.render_subagent_prompt("paper_reader")
-
-    def get_tools(self):
-        return build_reader_tools(self.capabilities)
 
 
 class StructureSubagent(PaperSubagent):
@@ -152,56 +142,20 @@ class PaperReaderCoordinator:
         self.structure_config = engine.subagent_config("paper_reader", DEFAULT_PAPER_STRUCTURE_CONFIG)
         self.reader_config = engine.subagent_config("paper_reader", DEFAULT_PAPER_READER_CONFIG)
         self.synthesis_config = engine.subagent_config("paper_reader", DEFAULT_PAPER_SYNTHESIS_CONFIG)
+        self.coordinator = SubagentCoordinator()
 
     def run(self) -> PaperAnalysisResult:
+        return self.read_paper_structured()
+
+    def read_paper_structured(self) -> PaperAnalysisResult:
         self.engine.analysis_dir.mkdir(parents=True, exist_ok=True)
         start = perf_counter()
-
-        structure_out = self._run_stage(
-            StructureSubagent,
-            objective="Extract the paper structure, metadata, and constraints.",
-            context=self.engine.reader_context(),
-            config=self.structure_config,
-            phase="analyze",
-            label="paper_structure",
-        )
-        algorithm_out = self._run_stage(
-            AlgorithmSubagent,
-            objective="Extract the implementation-facing algorithm and architecture details.",
-            context=self._stage_context(structure_out.content),
-            config=self.reader_config,
-            phase="analyze",
-            label="paper_algorithm",
-        )
-        experiments_out = self._run_stage(
-            ExperimentsSubagent,
-            objective="Extract the paper's datasets, metrics, tables, and evaluation procedure.",
-            context=self._stage_context(structure_out.content),
-            config=self.reader_config,
-            phase="analyze",
-            label="paper_experiments",
-        )
-        baseline_out = self._run_stage(
-            BaselineSubagent,
-            objective="Identify baselines, comparison methods, and model variants that must be reproduced.",
-            context=self._stage_context(structure_out.content),
-            config=self.reader_config,
-            phase="analyze",
-            label="paper_baseline",
-        )
-        synthesis_out = self._run_stage(
-            SynthesisSubagent,
-            objective="Synthesize the paper analysis into a concise overview for downstream implementation agents.",
-            context=self._synthesis_context(
-                structure_out.content,
-                algorithm_out.content,
-                experiments_out.content,
-                baseline_out.content,
-            ),
-            config=self.synthesis_config,
-            phase="analyze",
-            label="paper_synthesis",
-        )
+        coordinator_result = self.coordinator.run(self._build_subagent_tasks())
+        structure_out = coordinator_result.outputs["structure"]
+        algorithm_out = coordinator_result.outputs["algorithm"]
+        experiments_out = coordinator_result.outputs["experiments"]
+        baseline_out = coordinator_result.outputs["baseline"]
+        synthesis_out = coordinator_result.outputs["synthesis"]
 
         sections = {
             "structure": self._section("Structure", "structure.md", structure_out.content, "Paper structure, metadata, and constraints."),
@@ -214,30 +168,91 @@ class PaperReaderCoordinator:
         result = PaperAnalysisResult(
             executive_summary=synthesis_out.content.strip() or self._fallback_summary(sections),
             sections=sections,
-            outputs={
-                "structure": structure_out,
-                "algorithm": algorithm_out,
-                "experiments": experiments_out,
-                "baseline": baseline_out,
-                "synthesis": synthesis_out,
-            },
-            all_success=all(out.status == SubagentStatus.COMPLETED for out in (structure_out, algorithm_out, experiments_out, baseline_out, synthesis_out)),
-            failed_subagents=[
-                name
-                for name, output in {
-                    "structure": structure_out,
-                    "algorithm": algorithm_out,
-                    "experiments": experiments_out,
-                    "baseline": baseline_out,
-                    "synthesis": synthesis_out,
-                }.items()
-                if output.status != SubagentStatus.COMPLETED
-            ],
-            total_runtime_seconds=perf_counter() - start,
+            outputs=coordinator_result.outputs,
+            all_success=coordinator_result.all_success,
+            failed_subagents=coordinator_result.failed_subagents,
+            total_runtime_seconds=coordinator_result.total_runtime_seconds or (perf_counter() - start),
         )
 
         self._write_outputs(result)
         return result
+
+    def _build_subagent_tasks(self) -> list[SubagentTask]:
+        return [
+            SubagentTask(
+                name="structure",
+                run_fn=lambda _ctx: self._run_stage(
+                    StructureSubagent,
+                    objective="Extract the paper structure, metadata, and constraints.",
+                    context=self.engine.reader_context(),
+                    config=self.structure_config,
+                    phase="analyze",
+                    label="paper_structure",
+                    llm=self._clone_llm(),
+                ),
+            ),
+            SubagentTask(
+                name="algorithm",
+                dependencies=["structure"],
+                context_keys=["structure"],
+                run_fn=lambda ctx: self._run_stage(
+                    AlgorithmSubagent,
+                    objective="Extract the implementation-facing algorithm and architecture details.",
+                    context=self._stage_context(ctx.get("structure", SubagentOutput(SubagentStatus.FAILED, "")).content),
+                    config=self.reader_config,
+                    phase="analyze",
+                    label="paper_algorithm",
+                    llm=self._clone_llm(),
+                ),
+            ),
+            SubagentTask(
+                name="experiments",
+                dependencies=["structure"],
+                context_keys=["structure"],
+                run_fn=lambda ctx: self._run_stage(
+                    ExperimentsSubagent,
+                    objective="Extract the paper's datasets, metrics, tables, and evaluation procedure.",
+                    context=self._stage_context(ctx.get("structure", SubagentOutput(SubagentStatus.FAILED, "")).content),
+                    config=self.reader_config,
+                    phase="analyze",
+                    label="paper_experiments",
+                    llm=self._clone_llm(),
+                ),
+            ),
+            SubagentTask(
+                name="baseline",
+                dependencies=["structure"],
+                context_keys=["structure"],
+                run_fn=lambda ctx: self._run_stage(
+                    BaselineSubagent,
+                    objective="Identify baselines, comparison methods, and model variants that must be reproduced.",
+                    context=self._stage_context(ctx.get("structure", SubagentOutput(SubagentStatus.FAILED, "")).content),
+                    config=self.reader_config,
+                    phase="analyze",
+                    label="paper_baseline",
+                    llm=self._clone_llm(),
+                ),
+            ),
+            SubagentTask(
+                name="synthesis",
+                dependencies=["structure", "algorithm", "experiments", "baseline"],
+                context_keys=["structure", "algorithm", "experiments", "baseline"],
+                run_fn=lambda ctx: self._run_stage(
+                    SynthesisSubagent,
+                    objective="Synthesize the paper analysis into a concise overview for downstream implementation agents.",
+                    context=self._synthesis_context(
+                        ctx.get("structure", SubagentOutput(SubagentStatus.FAILED, "")).content,
+                        ctx.get("algorithm", SubagentOutput(SubagentStatus.FAILED, "")).content,
+                        ctx.get("experiments", SubagentOutput(SubagentStatus.FAILED, "")).content,
+                        ctx.get("baseline", SubagentOutput(SubagentStatus.FAILED, "")).content,
+                    ),
+                    config=self.synthesis_config,
+                    phase="analyze",
+                    label="paper_synthesis",
+                    llm=self._clone_llm(),
+                ),
+            ),
+        ]
 
     def _run_stage(
         self,
@@ -248,11 +263,12 @@ class PaperReaderCoordinator:
         config,
         phase: str,
         label: str,
+        llm=None,
     ) -> SubagentOutput:
         subagent = subagent_cls(
             self.engine,
             self.engine.shell,
-            self.engine.llm,
+            llm if llm is not None else self.engine.llm,
             config,
             objective=objective,
             context=context,
@@ -271,6 +287,15 @@ class PaperReaderCoordinator:
             payload={"status": output.status.value, "log_path": output.log_path},
         )
         return output
+
+    def _clone_llm(self):
+        llm = self.engine.llm
+        if llm is None:
+            return None
+        config = getattr(llm, "config", None)
+        if config is None:
+            return llm
+        return create_llm_client(config)
 
     def _write_outputs(self, result: PaperAnalysisResult) -> None:
         for section in result.sections.values():
@@ -328,7 +353,6 @@ __all__ = [
     "PaperAnalysisResult",
     "PaperAnalysisSection",
     "PaperReaderCoordinator",
-    "PaperReaderSubagent",
     "StructureSubagent",
     "SynthesisSubagent",
 ]

@@ -101,27 +101,35 @@ class ExperimentTool(Tool):
 
         lines = [header, "", "## Results", result.content.strip() or "(no output)", ""]
         if result.log_path:
-            lines.extend([f"Log: {result.log_path}", ""])
+            lines.extend([f"**Detailed log**: {result.log_path}", ""])
 
         if result.status == SubagentStatus.COMPLETED:
             lines.extend(
                 [
-                    "## Next Step",
-                    "Use the report above to decide whether to move on or run `implement(mode=\"fix\", context=\"<diagnosis>\")`.",
+                    "## What's Next?",
+                    "Read the experiment report above and decide:",
+                    "- If successful: move to the next task",
+                    "- If failed/partial: use `implement(mode='fix', task='fix ...', context='<diagnosis from above>')` then re-run",
                 ]
             )
         elif result.status == SubagentStatus.FAILED:
             lines.extend(
                 [
-                    "## Failure",
+                    "## Error",
                     result.error_message or "The experiment subagent failed.",
+                    "",
+                    "## What's Next?",
+                    "- Review the error and decide how to proceed",
+                    "- Use `implement(mode='fix', task='fix ...')` if code changes are needed",
                 ]
             )
         elif result.status == SubagentStatus.TIMEOUT:
             lines.extend(
                 [
-                    "## Timeout",
-                    "The experiment timed out. Inspect partial logs and decide whether to retry with a narrower validation task.",
+                    "## Note",
+                    "Experiment timed out. This could be normal for long-running experiments.",
+                    "- Check logs for partial output",
+                    "- Consider increasing time_budget or using mode='validate'",
                 ]
             )
         return "\n".join(lines).strip()
@@ -139,7 +147,6 @@ class ExperimentTool(Tool):
                         "mode": {"type": "string", "enum": ["full", "validate"], "description": "Experiment mode."},
                         "context": {"type": "string", "description": "Diagnostics or expectations from previous work."},
                         "time_budget": {"type": "integer", "description": "Time budget in seconds."},
-                        "max_steps": {"type": "integer", "description": "Optional step cap override."},
                     },
                     "required": ["task"],
                     "additionalProperties": False,

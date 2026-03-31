@@ -22,6 +22,7 @@ from aisci_agent_runtime.subagents.base import (
 )
 from aisci_agent_runtime.summary_utils import SummaryConfig, summarize_messages
 from aisci_agent_runtime.tools.base import SubagentCompleteSignal
+from aisci_agent_runtime.tools.constraints import build_blocked_patterns_from_blacklist
 from aisci_domain_paper.configs import (
     DEFAULT_DOWNLOAD_CONFIG,
     DEFAULT_ENV_SETUP_CONFIG,
@@ -38,7 +39,6 @@ from aisci_domain_paper.prompts import (
     render_general_system_prompt,
     render_implementation_system_prompt,
     render_main_agent_system_prompt,
-    render_paper_reader_system_prompt,
     render_plan_system_prompt,
     render_prioritization_system_prompt,
 )
@@ -61,7 +61,6 @@ class PaperRuntimeConfig:
     max_steps: int = 80
     reminder_freq: int = 5
     enable_online_research: bool = True
-    enable_github_research: bool = True
 
 
 class EmbeddedPaperEngine:
@@ -208,7 +207,7 @@ class EmbeddedPaperEngine:
                 continue
 
             for call in response.tool_calls:
-                if call.name in {"submit", "finish_run"}:
+                if call.name == "submit":
                     submit_feedback = self._handle_submit_precheck(elapsed)
                     if submit_feedback is not None:
                         log_tool_result_event(
@@ -276,20 +275,32 @@ class EmbeddedPaperEngine:
         self._write_state(summary=final_summary, mode="auto_finalize")
         return final_summary
 
-    def read_paper(self, refresh: bool = False) -> str:
+    def read_paper(self, paper_path: str = "/home/paper/paper.md") -> str:
         from aisci_domain_paper.tools.paper_reader_tool import ReadPaperTool
 
-        return str(ReadPaperTool(self).execute(self.shell, refresh=refresh))
+        return str(ReadPaperTool(self).execute(self.shell, paper_path=paper_path))
 
-    def prioritize_tasks(self, refresh: bool = False) -> str:
+    def prioritize_tasks(
+        self,
+        paper_analysis_dir: str = "/home/agent/paper_analysis",
+        rubric_path: str = "/home/paper/rubric.json",
+        focus_areas: str | None = None,
+    ) -> str:
         from aisci_domain_paper.tools.prioritization_tool import PrioritizeTasksTool
 
-        return str(PrioritizeTasksTool(self).execute(self.shell, refresh=refresh))
+        return str(
+            PrioritizeTasksTool(self).execute(
+                self.shell,
+                paper_analysis_dir=paper_analysis_dir,
+                rubric_path=rubric_path,
+                focus_areas=focus_areas,
+            )
+        )
 
     def run_implementation(
         self,
         *,
-        task: str,
+        task: str = "",
         mode: str = "full",
         context: str = "",
         max_steps: int | None = None,
@@ -440,10 +451,10 @@ class EmbeddedPaperEngine:
         )
         return self._format_subagent_result(label, result)
 
-    def run_clean_validation(self, refresh: bool = False) -> str:
+    def run_clean_validation(self) -> str:
         from aisci_domain_paper.tools.clean_validation_tool import CleanReproduceValidationTool
 
-        return str(CleanReproduceValidationTool(self).execute(self.shell, refresh=refresh))
+        return str(CleanReproduceValidationTool(self).execute(self.shell))
 
     def collect_artifacts(self) -> list[Path]:
         candidates = [
@@ -476,13 +487,16 @@ class EmbeddedPaperEngine:
     def constraints(self) -> dict[str, Any]:
         blacklist_path = self.paper_dir / "blacklist.txt"
         if not blacklist_path.exists():
-            return {"blacklist": []}
+            return {"blacklist": [], "blocked_search_patterns": {}}
         lines = [
             line.strip()
             for line in blacklist_path.read_text(encoding="utf-8", errors="replace").splitlines()
             if line.strip() and not line.strip().startswith("#")
         ]
-        return {"blacklist": lines}
+        return {
+            "blacklist": lines,
+            "blocked_search_patterns": build_blocked_patterns_from_blacklist(lines),
+        }
 
     def reader_context(self) -> str:
         files = list_files(self.paper_dir)
@@ -536,18 +550,12 @@ class EmbeddedPaperEngine:
             os.environ.get("AISCI_WEB_SEARCH", "").strip().lower() in {"1", "true", "yes", "on"}
             or (self.llm and getattr(self.llm.config, "web_search", False))
         )
-        github_available = llm_enabled and self.config.enable_github_research and bool(os.environ.get("GITHUB_TOKEN"))
         return {
             "llm_enabled": llm_enabled,
             "online_research": {
                 "requested": self.config.enable_online_research,
                 "available": online_available,
                 "mode": "model_native_web_search" if online_available else "disabled_or_unavailable",
-            },
-            "github_research": {
-                "requested": self.config.enable_github_research,
-                "available": github_available,
-                "mode": "github_token" if github_available else "disabled_or_unavailable",
             },
             "linter": {"available": True},
         }
@@ -564,35 +572,92 @@ class EmbeddedPaperEngine:
     def _build_reminder(self, step: int, elapsed: float, *, reproduce_sh_exists: bool) -> str:
         remaining = max(0, self.config.time_limit_seconds - elapsed)
         lines = [
-            f"Reminder: step {step}/{self.config.max_steps}. Elapsed {int(elapsed)}s, remaining {int(remaining)}s.",
-            f"Artifacts ready: read_paper={'yes' if (self.analysis_dir / 'summary.md').exists() else 'no'}, "
-            f"priorities={'yes' if self.prioritized_path.exists() else 'no'}, "
-            f"impl_runs={self._impl_runs}, exp_runs={self._exp_runs}, self_checks={self._validate_runs}.",
+            f"Info: step {step}/{self.config.max_steps}. Elapsed {int(elapsed)}s out of {self.config.time_limit_seconds}s "
+            f"(remaining {int(remaining)}s).",
         ]
         exp_impl_gap = self._impl_exp_sequence.count("exp") - self._impl_exp_sequence.count("impl")
         impl_exp_gap = self._impl_exp_sequence.count("impl") - self._impl_exp_sequence.count("exp")
         if exp_impl_gap >= 4:
             lines.append(
-                "Experiment calls are far ahead of implementation calls. Do not rerun experiments without making fixes; "
-                "use implement(mode='fix', context='<diagnosis>') or move on."
+                f"IMPLEMENT/EXPERIMENT IMBALANCE: run_experiment has been called {self._impl_exp_sequence.count('exp')} times "
+                f"but implement only {self._impl_exp_sequence.count('impl')} times. Experiments are deterministic; "
+                "do not rerun them without code changes. Call implement(mode='fix', context='<diagnosis from last experiment>') "
+                "or move on to the next priority task."
             )
         elif exp_impl_gap >= 2:
-            lines.append("Experiments are outpacing fixes. If results are failing, implement a targeted fix before validating again.")
+            lines.append(
+                f"Experiment calls ({self._impl_exp_sequence.count('exp')}) are outpacing implement calls "
+                f"({self._impl_exp_sequence.count('impl')}). If results are failing, call implement(mode='fix') before running more experiments."
+            )
         if impl_exp_gap >= 3:
-            lines.append("Implementation is outpacing validation. Run run_experiment(mode='validate') before starting more major changes.")
+            lines.append(
+                f"VALIDATION GAP: implement has been called {self._impl_exp_sequence.count('impl')} times "
+                f"but run_experiment only {self._impl_exp_sequence.count('exp')} times. Validate reproduce.sh or a focused experiment now "
+                "before starting more large changes."
+            )
 
         time_ratio = elapsed / self.config.time_limit_seconds if self.config.time_limit_seconds else 0.0
         if time_ratio >= 0.85:
             if reproduce_sh_exists:
-                lines.append("Less than 15% time remains. Stabilize reproduce.sh, commit all meaningful work, and avoid starting large new tasks.")
+                lines.extend(
+                    [
+                        "Less than 15% time remains.",
+                        "- Make sure all changes are committed to git.",
+                        "- Finish in-progress work instead of starting broad new tasks.",
+                        "- Ensure reproduce.sh is up to date with the latest runnable code.",
+                    ]
+                )
             else:
-                lines.append("Less than 15% time remains and reproduce.sh is still missing. Creating and committing reproduce.sh is the top priority.")
+                lines.extend(
+                    [
+                        "Less than 15% time remains AND reproduce.sh still does not exist.",
+                        "Without reproduce.sh, execution results are effectively zero. Creating and committing reproduce.sh is the top priority now.",
+                    ]
+                )
         elif time_ratio >= 0.70:
-            lines.append("More than 70% of time is used. Focus on validating in-flight work and keeping reproduce.sh current.")
+            if reproduce_sh_exists:
+                lines.extend(
+                    [
+                        "70%+ of time is used.",
+                        "- If reproduce.sh has not been validated recently, run a validation now.",
+                        "- Commit all meaningful work regularly.",
+                        "- Avoid starting large new tasks unless they are clearly higher value than stabilizing current work.",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "70%+ of time is used AND reproduce.sh still does not exist.",
+                        "Creating reproduce.sh should be your highest priority now.",
+                    ]
+                )
         elif time_ratio >= 0.50:
-            lines.append("More than 50% of time is used. Keep pushing breadth across P0/P1 tasks before considering submit.")
+            lines.extend(
+                [
+                    "50%+ of time is used. Keep implementing; do not submit yet unless P0/P1 coverage is already in good shape.",
+                    "- Check /home/agent/prioritized_tasks.md for remaining tasks.",
+                    "- Each additional dataset, baseline, or model variant you cover improves the reproduction.",
+                ]
+            )
+            if not reproduce_sh_exists:
+                lines.append("IMPORTANT: reproduce.sh still does not exist. Create it now via implement(mode='full').")
+        else:
+            lines.extend(
+                [
+                    "Reminders:",
+                    "- Focus on P0-Critical tasks first and use /home/agent/prioritized_tasks.md as the source of truth.",
+                    "- Keep paper_analysis files in mind when making implementation decisions.",
+                    "- Do not submit early; maximize useful coverage while time remains.",
+                ]
+            )
+            if not reproduce_sh_exists:
+                lines.append("IMPORTANT: reproduce.sh does not exist yet. Creating it is the #1 deliverable.")
 
-        lines.append("Keep reproduce.sh committed and do not submit before final self-check or a concrete failure diagnosis.")
+        if not self._clean_validation_called:
+            lines.append(
+                "Call clean_reproduce_validation() after the first major implementation round and again before you finish. "
+                "Use run_experiment() for the fast inner validation loop."
+            )
         return "\n".join(lines)
 
     def _continue_instruction(self) -> str:
@@ -719,7 +784,6 @@ class EmbeddedPaperEngine:
             "explore": render_explore_system_prompt,
             "plan": render_plan_system_prompt,
             "general": render_general_system_prompt,
-            "paper_reader": render_paper_reader_system_prompt,
             "prioritization": render_prioritization_system_prompt,
         }
         renderer = mapping.get(kind)
@@ -773,17 +837,20 @@ class EmbeddedPaperEngine:
 
         if self._submit_attempts == 1 and time_ratio < 0.5:
             warnings.append(
-                f"Early submission: only {time_ratio * 100:.0f}% of the budget is used ({remaining_hours:.1f}h remaining). "
-                "Review prioritized_tasks.md for remaining coverage before finishing."
+                f"EARLY SUBMISSION: Only {time_ratio * 100:.0f}% of the time budget has been used ({remaining_hours:.1f}h remaining). "
+                "You likely still have time to cover more baselines, datasets, or model variants. Review /home/agent/prioritized_tasks.md "
+                "before deciding to finish."
             )
 
         if not self._reproduce_script_exists():
             hard_errors.append(
-                "reproduce.sh is missing at /home/submission/reproduce.sh. Submission is blocked until it exists."
+                "reproduce.sh DOES NOT EXIST at /home/submission/reproduce.sh. Submission is blocked until it exists. "
+                "Without reproduce.sh, the end-to-end reproduction cannot run."
             )
         elif not self._reproduce_script_tracked():
             hard_errors.append(
-                "reproduce.sh exists but is not tracked by git. git clean -fd will remove it, so submission remains blocked."
+                "reproduce.sh exists but is NOT TRACKED BY GIT. git clean -fd removes untracked files, so reproduce.sh would be lost. "
+                "Add it to git and commit it before submitting."
             )
 
         if hard_errors:
@@ -800,7 +867,9 @@ class EmbeddedPaperEngine:
         warnings.extend(self._submit_syntax_warnings())
         if not self._clean_validation_called and self._submit_attempts == 1:
             warnings.append(
-                "clean_reproduce_validation() has not been run yet. Run it before submit to catch clean-environment failures."
+                "CLEAN ENVIRONMENT VALIDATION NOT PERFORMED: clean_reproduce_validation() has not been run yet. "
+                "That tool clears venv and caches, then validates reproduce.sh from a clean state. Without it, cached state may be hiding "
+                "missing dependencies, stale datasets, or hardcoded paths."
             )
 
         if warnings:
@@ -810,6 +879,10 @@ class EmbeddedPaperEngine:
                 phase="finalize",
                 payload={"warnings": warnings, "submit_attempt": self._submit_attempts},
             )
-            return "SUBMIT PRE-CHECK WARNINGS:\n\n" + "\n\n".join(f"- {item}" for item in warnings) + "\n\nIf you still want to finish, call submit() again."
+            return (
+                "SUBMIT PRE-CHECK WARNINGS:\n\n"
+                + "\n\n".join(f"- {item}" for item in warnings)
+                + "\n\nIf you still want to finish, call submit() again."
+            )
 
         return None

@@ -125,7 +125,6 @@ def _build_paper_form_spec(form: dict[str, Any]) -> JobSpec:
             supporting_materials=form["supporting_materials"],
             submission_seed_repo_zip=form["submission_seed_repo_zip"],
             enable_online_research=form["enable_online_research"],
-            enable_github_research=form["enable_github_research"],
         ),
     )
 
@@ -272,7 +271,6 @@ def create_app() -> FastAPI:
         dockerfile_path: str | None = Form(None),
         run_final_validation: bool = Form(False),
         enable_online_research: bool = Form(False),
-        enable_github_research: bool = Form(False),
         objective: str = Form("paper reproduction job"),
     ) -> RedirectResponse:
         service = JobService()
@@ -293,7 +291,6 @@ def create_app() -> FastAPI:
                 "dockerfile_path": dockerfile_path,
                 "run_final_validation": run_final_validation,
                 "enable_online_research": enable_online_research,
-                "enable_github_research": enable_github_research,
                 "objective": objective,
             }
         )
@@ -345,7 +342,6 @@ def create_app() -> FastAPI:
         submission_seed_repo_zip: str | None = Form(None),
         supporting_materials: str | None = Form(None),
         enable_online_research: bool = Form(True),
-        enable_github_research: bool = Form(True),
         workspace_zip: str | None = Form(None),
         competition_bundle_zip: str | None = Form(None),
         data_dir: str | None = Form(None),
@@ -375,7 +371,6 @@ def create_app() -> FastAPI:
                     "dockerfile_path": dockerfile_path,
                     "run_final_validation": run_final_validation,
                     "enable_online_research": enable_online_research,
-                    "enable_github_research": enable_github_research,
                     "objective": objective,
                 }
             )

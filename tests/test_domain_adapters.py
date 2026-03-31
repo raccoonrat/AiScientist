@@ -18,7 +18,8 @@ from aisci_core.models import (
 from aisci_core.paths import ensure_job_dirs, resolve_job_paths
 from aisci_domain_mle.adapter import MLEDomainAdapter
 from aisci_domain_paper.adapter import PaperDomainAdapter
-from aisci_runtime_docker.profiles import default_mle_profile
+from aisci_runtime_docker.models import ContainerSession, DockerExecutionResult
+from aisci_runtime_docker.profiles import default_mle_profile, default_paper_profile
 from aisci_runtime_docker.runtime import DockerRuntimeError, DockerRuntimeManager
 
 
@@ -29,7 +30,7 @@ def _make_pdf(path: Path) -> None:
         writer.write(handle)
 
 
-def _paper_job(tmp_path: Path, pdf_path: Path) -> JobRecord:
+def _paper_job(tmp_path: Path, pdf_path: Path, *, run_final_validation: bool = False) -> JobRecord:
     now = __import__("datetime").datetime.now().astimezone()
     return JobRecord(
         id="paper-job",
@@ -39,7 +40,7 @@ def _paper_job(tmp_path: Path, pdf_path: Path) -> JobRecord:
         objective="paper objective",
         llm_profile="test",
         runtime_profile=RuntimeProfile(
-            run_final_validation=False,
+            run_final_validation=run_final_validation,
             workspace_layout=WorkspaceLayout.PAPER,
         ),
         mode_spec=PaperSpec(pdf_path=str(pdf_path)),
@@ -107,6 +108,82 @@ def test_paper_adapter_stages_artifacts(tmp_path: Path, monkeypatch) -> None:
     assert (job_paths.workspace_dir / "agent" / "paper_analysis" / "summary.md").exists()
     assert (job_paths.workspace_dir / "agent" / "capabilities.json").exists()
     assert (job_paths.workspace_dir / "agent" / "final_self_check.md").exists()
+
+
+def test_default_paper_profile_prefers_repo_local_agent_dockerfile(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AISCI_REPO_ROOT", str(tmp_path))
+    docker_dir = tmp_path / "docker"
+    docker_dir.mkdir(parents=True, exist_ok=True)
+    agent_dockerfile = docker_dir / "paper-agent.Dockerfile"
+    fallback_dockerfile = docker_dir / "paper.Dockerfile"
+    agent_dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    fallback_dockerfile.write_text("FROM busybox\n", encoding="utf-8")
+
+    profile = default_paper_profile()
+
+    assert profile.dockerfile_path == agent_dockerfile
+    assert profile.context_dir == tmp_path
+    assert profile.image_tag.startswith("aisci-paper:")
+
+
+def test_paper_adapter_reuses_same_image_for_main_and_validation(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AISCI_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    (tmp_path / "docker").mkdir(parents=True, exist_ok=True)
+    dockerfile = tmp_path / "docker" / "paper-agent.Dockerfile"
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    pdf_path = tmp_path / "sample.pdf"
+    _make_pdf(pdf_path)
+
+    runtime = DockerRuntimeManager()
+    monkeypatch.setattr(runtime, "can_use_docker", lambda: True)
+
+    build_paths: list[Path] = []
+    started_specs = []
+    started_tags: list[str] = []
+
+    def fake_build_profile(profile, runtime_profile):  # noqa: ANN001,ARG001
+        build_paths.append(profile.dockerfile_path)
+        return "paper-image:123"
+
+    def fake_start_session(spec, image_tag):  # noqa: ANN001
+        started_specs.append(spec)
+        started_tags.append(image_tag)
+        return ContainerSession(
+            container_name="paper-test-session",
+            image_tag=image_tag,
+            profile=spec.profile,
+            runtime_profile=spec.runtime_profile,
+            workspace_layout=spec.workspace_layout,
+            mounts=spec.mounts,
+            workdir=spec.workdir,
+        )
+
+    def fake_exec(session, command, *, workdir=None, env=None, check=False):  # noqa: ANN001,ARG001
+        submission_dir = next(mount.source for mount in session.mounts if mount.target == "/home/submission")
+        if command == "python -m aisci_domain_paper.orchestrator":
+            (submission_dir / "reproduce.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        return DockerExecutionResult(
+            command=["docker", "exec"],
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runtime, "build_profile", fake_build_profile)
+    monkeypatch.setattr(runtime, "start_session", fake_start_session)
+    monkeypatch.setattr(runtime, "exec", fake_exec)
+    monkeypatch.setattr(runtime, "cleanup", lambda session: None)
+
+    adapter = PaperDomainAdapter(runtime)
+    result = adapter.run(_paper_job(tmp_path, pdf_path, run_final_validation=True))
+
+    assert result["validation_report"].status == "passed"
+    assert result["validation_report"].container_image == "paper-image:123"
+    assert build_paths == [dockerfile, dockerfile]
+    assert started_tags == ["paper-image:123", "paper-image:123"]
+    assert len(started_specs) == 2
+    assert all(spec.profile.dockerfile_path == dockerfile for spec in started_specs)
 
 
 def test_paper_adapter_requires_docker(tmp_path: Path, monkeypatch) -> None:

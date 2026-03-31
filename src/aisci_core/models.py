@@ -90,9 +90,7 @@ class PaperSpec(BaseModel):
     context_bundle_zip: str | None = None
     supporting_materials: list[str] = Field(default_factory=list)
     submission_seed_repo_zip: str | None = None
-    expected_outputs: list[str] = Field(default_factory=list)
     enable_online_research: bool = True
-    enable_github_research: bool = True
 
     @model_validator(mode="after")
     def validate_inputs(self) -> "PaperSpec":

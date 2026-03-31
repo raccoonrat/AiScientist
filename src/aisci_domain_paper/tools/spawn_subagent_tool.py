@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from aisci_domain_paper.tools.basic_tool import (
-    FinishRunTool,
     SubmitTool,
     build_main_direct_tools,
     callback_tool,
@@ -27,7 +26,6 @@ def build_spawn_subagent_tool(engine):
                 "task": {"type": "string"},
                 "context": {"type": "string"},
                 "time_budget": {"type": "integer"},
-                "max_steps": {"type": "integer"},
             },
             "required": ["subagent_type", "task"],
             "additionalProperties": False,
@@ -52,7 +50,6 @@ def build_main_tools(engine):
         build_spawn_subagent_tool(engine),
         build_clean_validation_tool(engine),
         SubmitTool(),
-        FinishRunTool(),
     ]
 
 

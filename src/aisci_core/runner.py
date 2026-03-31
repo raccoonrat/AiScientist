@@ -22,7 +22,7 @@ class JobRunner:
         self.paper = PaperDomainAdapter(self.runtime)
         self.mle = MLEDomainAdapter(self.runtime)
 
-    def run_job(self, job_id: str) -> None:
+    def run_job(self, job_id: str) -> JobStatus:
         job = self.store.get_job(job_id)
         paths = ensure_job_dirs(resolve_job_paths(job_id))
         self.store.mark_running(job_id, os.getpid())
@@ -86,6 +86,7 @@ class JobRunner:
             )
             self.store.complete_job(job_id, JobStatus.SUCCEEDED)
             append_log(paths.logs_dir / "job.log", "job succeeded")
+            return JobStatus.SUCCEEDED
         except Exception as exc:
             append_log(paths.logs_dir / "job.log", f"job failed: {exc}")
             (paths.logs_dir / "traceback.log").write_text(traceback.format_exc(), encoding="utf-8")
@@ -97,6 +98,7 @@ class JobRunner:
                 {"traceback": traceback.format_exc()},
             )
             self.store.complete_job(job_id, JobStatus.FAILED, error=str(exc))
+            return JobStatus.FAILED
 
     def _dispatch(self, job):
         if job.job_type.value == "paper":
@@ -236,7 +238,7 @@ class JobRunner:
             return RunPhase.IMPLEMENT
         if any(name in lowered for name in ("run_experiment", "clean_reproduce_validation", "validate")):
             return RunPhase.VALIDATE
-        if any(name in lowered for name in ("submit", "finish_run")):
+        if "submit" in lowered:
             return RunPhase.FINALIZE
         return fallback
 

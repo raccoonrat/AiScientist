@@ -330,8 +330,9 @@
                 <input name="gpus" type="number" min="0" value="0">
               </div>
               <div class="field">
-                <label>Dockerfile</label>
-                <input name="dockerfile_path" placeholder="/path/to/Dockerfile">
+                <label>Dockerfile override</label>
+                <input name="dockerfile_path" placeholder="/path/to/Dockerfile (advanced override)">
+                <div class="tiny muted">Optional. Leave empty to use the default paper work-environment image.</div>
               </div>
             </div>
             <div class="form-grid" style="margin-top: 12px;">
@@ -370,9 +371,6 @@
                 </div>
                 <div class="field">
                   <label><input type="checkbox" name="enable_online_research" checked> Enable online research</label>
-                </div>
-                <div class="field">
-                  <label><input type="checkbox" name="enable_github_research" checked> Enable GitHub research</label>
                 </div>
               </div>
             </details>

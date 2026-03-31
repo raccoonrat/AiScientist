@@ -71,18 +71,12 @@ def paper_capability_flags(job: JobRecord) -> dict[str, str]:
     runtime = job.runtime_profile
     resolved = _resolved_paper_capabilities(job)
     online = resolved.get("online_research")
-    github = resolved.get("github_research")
     linter = resolved.get("linter")
     return {
         "online_research": (
             "available"
             if isinstance(online, dict) and online.get("available")
             else ("requested" if job.mode_spec.enable_online_research else "disabled")
-        ),
-        "github_research": (
-            "available"
-            if isinstance(github, dict) and github.get("available")
-            else ("requested" if job.mode_spec.enable_github_research else "disabled")
         ),
         "linter": "available" if isinstance(linter, dict) and linter.get("available", False) else "enabled",
         "final_self_check": "enabled" if runtime.run_final_validation else "disabled",
@@ -179,7 +173,6 @@ def build_paper_job_spec(
     dockerfile: str | None,
     run_final_validation: bool,
     enable_online_research: bool = True,
-    enable_github_research: bool = True,
     objective: str = "paper reproduction job",
 ) -> JobSpec:
     runtime = RuntimeProfile(
@@ -205,7 +198,6 @@ def build_paper_job_spec(
             supporting_materials=supporting_materials,
             submission_seed_repo_zip=seed_repo_zip,
             enable_online_research=enable_online_research,
-            enable_github_research=enable_github_research,
         ),
     )
 
@@ -373,14 +365,6 @@ def paper_doctor_report() -> list[PaperDoctorCheck]:
                 if api_key
                 else "No API key detected in environment; paper jobs will not start without OPENAI_API_KEY or AZURE_OPENAI_API_KEY"
             ),
-        )
-    )
-    github_token = bool(os.environ.get("GITHUB_TOKEN"))
-    checks.append(
-        PaperDoctorCheck(
-            "github_token",
-            "ok" if github_token else "warn",
-            "GitHub research can be enabled" if github_token else "GITHUB_TOKEN not set; github tool will be removed from live prompts",
         )
     )
     web_search_enabled = os.environ.get("AISCI_WEB_SEARCH", "").strip().lower() in {"1", "true", "yes", "on"}

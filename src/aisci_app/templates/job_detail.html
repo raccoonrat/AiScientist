@@ -300,7 +300,7 @@
           <div class="tiny muted">LLM: {{ job.llm_profile }}</div>
           <div class="tiny muted">Validation: {% if job.runtime_profile.run_final_validation %}enabled{% else %}disabled{% endif %}</div>
           {% if job.job_type.value == "paper" %}
-          <div class="tiny muted">Research: {% if job.mode_spec.enable_online_research %}online{% else %}offline{% endif %} / {% if job.mode_spec.enable_github_research %}github{% else %}no github{% endif %}</div>
+          <div class="tiny muted">Research: {% if job.mode_spec.enable_online_research %}online{% else %}offline{% endif %}</div>
           {% endif %}
         </div>
       </div>

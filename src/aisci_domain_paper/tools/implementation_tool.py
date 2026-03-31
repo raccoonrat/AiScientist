@@ -19,7 +19,7 @@ class ImplementationTool(Tool):
     def execute(
         self,
         shell,  # noqa: ARG002
-        task: str,
+        task: str = "",
         mode: str = "full",
         context: str = "",
         time_budget: int | None = None,
@@ -108,29 +108,34 @@ class ImplementationTool(Tool):
 
         lines = [header, "", "## Summary", result.content.strip() or "(no output)", ""]
         if result.log_path:
-            lines.extend([f"Log: {result.log_path}", ""])
+            lines.extend([f"**Detailed log**: {result.log_path}", ""])
 
         if result.status == SubagentStatus.COMPLETED:
             lines.extend(
                 [
-                    "## Next Step",
-                    "Run `run_experiment(...)` to validate the latest implementation before starting another major coding round.",
+                    "## What's Next?",
+                    "- Run `run_experiment()` to validate reproduce.sh end-to-end",
+                    "- If experiment fails, use `implement(mode='fix', task='...', context='<diagnosis>')` to fix",
                 ]
             )
         elif result.status == SubagentStatus.FAILED:
             lines.extend(
                 [
-                    "## Failure",
+                    "## Error",
                     result.error_message or "The implementation subagent failed.",
                     "",
-                    "Use the error and logs above to decide whether to run another targeted `implement(mode=\"fix\")` call.",
+                    "## Recommendation",
+                    "- Review the error and decide how to proceed",
+                    "- Re-run with `implement(mode='fix', ...)` if a targeted fix is needed",
                 ]
             )
         elif result.status == SubagentStatus.TIMEOUT:
             lines.extend(
                 [
-                    "## Timeout",
-                    "The implementation subagent timed out. Review the partial output and logs before retrying.",
+                    "## Note",
+                    "Implementation timed out. Check if partial progress was made.",
+                    "- Review git log for any commits",
+                    "- Run `run_experiment()` to validate what was completed",
                 ]
             )
         return "\n".join(lines).strip()
@@ -148,9 +153,8 @@ class ImplementationTool(Tool):
                         "mode": {"type": "string", "enum": ["full", "fix"], "description": "Implementation mode."},
                         "context": {"type": "string", "description": "Feedback or constraints from previous work."},
                         "time_budget": {"type": "integer", "description": "Time budget in seconds."},
-                        "max_steps": {"type": "integer", "description": "Optional step cap override."},
                     },
-                    "required": ["task"],
+                    "required": [],
                     "additionalProperties": False,
                 },
             },
@@ -193,7 +197,6 @@ class SpawnEnvSetupTool(Tool):
                         "task": {"type": "string"},
                         "context": {"type": "string"},
                         "time_budget": {"type": "integer"},
-                        "max_steps": {"type": "integer"},
                     },
                     "required": ["task"],
                     "additionalProperties": False,
@@ -238,7 +241,6 @@ class SpawnResourceDownloadTool(Tool):
                         "task": {"type": "string"},
                         "context": {"type": "string"},
                         "time_budget": {"type": "integer"},
-                        "max_steps": {"type": "integer"},
                     },
                     "required": ["task"],
                     "additionalProperties": False,

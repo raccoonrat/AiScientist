@@ -1,14 +1,40 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
-from aisci_app.cli import _log_targets_for_kind
+from typer.testing import CliRunner
+
+from aisci_app.cli import _log_targets_for_kind, app
+from aisci_app.worker_main import main as worker_main
 from aisci_app.presentation import paper_doctor_report, paper_job_summary
-from aisci_core.models import JobSpec, JobType, PaperSpec, RuntimeProfile, WorkspaceLayout
+from aisci_core.models import JobRecord, JobSpec, JobStatus, JobType, PaperSpec, RunPhase, RuntimeProfile, WorkspaceLayout
 from aisci_core.paths import ensure_job_dirs, resolve_job_paths
 from aisci_core.store import JobStore
 from aisci_app.service import JobService
+
+
+def _paper_job_record(*, status: JobStatus, phase: RunPhase, error: str | None = None) -> JobRecord:
+    now = datetime.now().astimezone()
+    return JobRecord(
+        id="paper-job-cli",
+        job_type=JobType.PAPER,
+        status=status,
+        phase=phase,
+        objective="paper cli",
+        llm_profile="gpt-5.4-responses",
+        runtime_profile=RuntimeProfile(
+            workspace_layout=WorkspaceLayout.PAPER,
+            run_final_validation=True,
+        ),
+        mode_spec=PaperSpec(pdf_path="/tmp/paper.pdf"),
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+        ended_at=now,
+        error=error,
+    )
 
 
 def _create_paper_job(tmp_path: Path):
@@ -47,7 +73,6 @@ def _create_paper_job(tmp_path: Path):
         json.dumps(
             {
                 "online_research": {"available": True},
-                "github_research": {"available": False},
                 "linter": {"available": True},
             }
         ),
@@ -62,7 +87,6 @@ def test_paper_job_summary_exposes_product_signals(tmp_path: Path, monkeypatch) 
     job, _ = _create_paper_job(tmp_path)
     summary = paper_job_summary(job)
     assert summary["paper_capabilities"]["online_research"] == "available"
-    assert summary["paper_capabilities"]["github_research"] == "requested"
     assert summary["paper_capabilities"]["final_self_check"] == "enabled"
     assert any(item["label"] == "main job log" for item in summary["paper_log_targets"])
     assert any(item["label"].startswith("session: ") for item in summary["paper_log_targets"])
@@ -83,5 +107,49 @@ def test_log_target_helper_lists_paper_logs(tmp_path: Path, monkeypatch) -> None
 def test_paper_doctor_reports_console_tip() -> None:
     report = paper_doctor_report()
     assert any(check.name == "paper console" for check in report)
-    assert any(check.name == "github_token" for check in report)
     assert any(check.name == "online_research" for check in report)
+
+
+def test_worker_main_returns_nonzero_when_job_fails(monkeypatch) -> None:
+    class _Runner:
+        def run_job(self, job_id: str) -> JobStatus:
+            assert job_id == "job-123"
+            return JobStatus.FAILED
+
+    monkeypatch.setattr("aisci_app.worker_main.JobRunner", lambda: _Runner())
+    assert worker_main(["job-123"]) == 1
+
+
+def test_paper_run_wait_reports_final_failure(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    created_job = _paper_job_record(status=JobStatus.PENDING, phase=RunPhase.INGEST)
+    final_job = _paper_job_record(status=JobStatus.FAILED, phase=RunPhase.ANALYZE, error="docker missing")
+
+    class _Store:
+        def get_job(self, job_id: str) -> JobRecord:
+            assert job_id == created_job.id
+            return final_job
+
+    class _Service:
+        def __init__(self) -> None:
+            self.store = _Store()
+
+        def create_job(self, spec) -> JobRecord:  # noqa: ANN001
+            return created_job
+
+        def spawn_worker(self, job_id: str, wait: bool = False) -> int:
+            assert job_id == created_job.id
+            assert wait is True
+            return 1
+
+    monkeypatch.setattr("aisci_app.cli.JobService", _Service)
+    monkeypatch.setattr("aisci_app.cli.build_paper_job_spec", lambda **kwargs: object())
+
+    result = runner.invoke(app, ["paper", "run", "--pdf", str(tmp_path / "paper.pdf"), "--wait"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["job_id"] == created_job.id
+    assert payload["status"] == "failed"
+    assert payload["phase"] == "analyze"
+    assert payload["error"] == "docker missing"

@@ -13,14 +13,20 @@ class ReadPaperTool(Tool):
     def name(self) -> str:
         return "read_paper"
 
-    def execute(self, shell, refresh: bool = False, **kwargs: Any) -> str:  # noqa: ARG002
+    def execute(
+        self,
+        shell,  # noqa: ARG002
+        paper_path: str = "/home/paper/paper.md",
+        **kwargs: Any,  # noqa: ARG002
+    ) -> str:
         self.engine._ensure_workspace()
-        if self._analysis_ready() and not refresh:
-            summary_path = self.engine.analysis_dir / "summary.md"
-            return summary_path.read_text(encoding="utf-8") if summary_path.exists() else "Paper analysis already exists at /home/agent/paper_analysis/summary.md."
+        if paper_path != "/home/paper/paper.md":
+            if not shell.file_exists(paper_path):
+                return f"Error reading paper: {paper_path} does not exist."
+            shell.write_file("/home/paper/paper.md", shell.read_file(paper_path))
 
         self.engine.trace.event("subagent_start", "read_paper started.", phase="analyze", payload={})
-        result = PaperReaderCoordinator(self.engine).run()
+        result = PaperReaderCoordinator(self.engine).read_paper_structured()
         summary_path = self.engine.analysis_dir / "summary.md"
         self.engine.trace.event(
             "subagent_finish",
@@ -28,17 +34,21 @@ class ReadPaperTool(Tool):
             phase="analyze",
             payload={"summary": str(summary_path)},
         )
-        return result.summary_with_navigation
+        return self._build_agent_response(result)
 
-    def _analysis_ready(self) -> bool:
-        required = [
-            self.engine.analysis_dir / "summary.md",
-            self.engine.analysis_dir / "structure.md",
-            self.engine.analysis_dir / "algorithm.md",
-            self.engine.analysis_dir / "experiments.md",
-            self.engine.analysis_dir / "baseline.md",
+    def _build_agent_response(self, result) -> str:
+        lines = [
+            "# Paper Reading Complete",
+            "",
+            f"**Total Runtime**: {result.total_runtime_seconds:.1f}s",
+            f"**All Success**: {result.all_success}",
+            "",
         ]
-        return all(path.exists() for path in required)
+        if result.failed_subagents:
+            lines.append(f"⚠️ **Failed Subagents**: {', '.join(result.failed_subagents)}")
+            lines.append("")
+        lines.append(result.summary_with_navigation)
+        return "\n".join(lines).strip()
 
     def get_tool_schema(self) -> dict[str, Any]:
         return {
@@ -49,10 +59,11 @@ class ReadPaperTool(Tool):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "refresh": {
-                            "type": "boolean",
-                            "description": "Regenerate analysis even if files already exist.",
-                        }
+                        "paper_path": {
+                            "type": "string",
+                            "description": "Path to the paper markdown file.",
+                            "default": "/home/paper/paper.md",
+                        },
                     },
                     "additionalProperties": False,
                 },

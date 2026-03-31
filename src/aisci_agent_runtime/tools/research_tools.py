@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import base64
 import json
-import os
 import re
 import urllib.parse
 import urllib.request
@@ -10,7 +8,12 @@ from html import unescape
 from typing import Any
 
 from aisci_agent_runtime.tools.base import Tool
+from aisci_agent_runtime.tools.constraints import (
+    filter_blocked_result_items,
+    is_url_blocked,
+)
 
+BLOCKED_CONTENT_MARKER = "ACCESS DENIED:"
 
 def _blocked_by_constraints(candidate: str, constraints: dict[str, Any] | None) -> str | None:
     if not constraints:
@@ -24,7 +27,7 @@ def _blocked_by_constraints(candidate: str, constraints: dict[str, Any] | None) 
     return None
 
 
-def _fetch_text(url: str, headers: dict[str, str] | None = None, max_chars: int = 20_000) -> str:
+def _fetch_raw(url: str, headers: dict[str, str] | None = None) -> str:
     request = urllib.request.Request(
         url,
         headers={
@@ -33,13 +36,56 @@ def _fetch_text(url: str, headers: dict[str, str] | None = None, max_chars: int 
         },
     )
     with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
-        body = response.read()
-    text = body.decode("utf-8", errors="replace")
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _html_to_text(text: str, max_chars: int = 20_000) -> str:
     text = re.sub(r"(?is)<script.*?>.*?</script>", " ", text)
     text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = unescape(re.sub(r"\s+", " ", text)).strip()
     return text[:max_chars]
+
+
+def _fetch_text(url: str, headers: dict[str, str] | None = None, max_chars: int = 20_000) -> str:
+    return _html_to_text(_fetch_raw(url, headers=headers), max_chars=max_chars)
+
+
+def _decode_duckduckgo_href(href: str) -> str:
+    parsed = urllib.parse.urlparse(href)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        params = urllib.parse.parse_qs(parsed.query)
+        if "uddg" in params and params["uddg"]:
+            return urllib.parse.unquote(params["uddg"][0])
+    return href
+
+
+def _extract_duckduckgo_results(html: str, limit: int) -> list[dict[str, Any]]:
+    anchor_pattern = re.compile(
+        r'(?is)<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+    )
+    snippet_pattern = re.compile(
+        r'(?is)<(?:a|div)[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|div)>'
+    )
+
+    anchors = list(anchor_pattern.finditer(html))
+    results: list[dict[str, Any]] = []
+    for idx, match in enumerate(anchors[:limit], start=1):
+        href = _decode_duckduckgo_href(unescape(match.group(1)))
+        title = _html_to_text(match.group(2), max_chars=500)
+        chunk_end = anchors[idx].start() if idx < len(anchors) else len(html)
+        chunk = html[match.end() : chunk_end]
+        snippet_match = snippet_pattern.search(chunk)
+        description = _html_to_text(snippet_match.group(1), max_chars=800) if snippet_match else ""
+        results.append(
+            {
+                "position": idx,
+                "title": title or "(untitled)",
+                "description": description or "",
+                "url": href,
+            }
+        )
+    return results
 
 
 class WebSearchTool(Tool):
@@ -55,29 +101,46 @@ class WebSearchTool(Tool):
     def execute(
         self,
         shell,  # noqa: ARG002
-        query: str,
-        max_results: int = 5,
+        query: str | list[str],
+        num: int = 10,
+        start: int = 0,
         constraints: dict[str, Any] | None = None,
         **kwargs: Any,  # noqa: ARG002
     ) -> str:
-        blocked = _blocked_by_constraints(query, constraints)
-        if blocked:
-            return blocked
-        encoded = urllib.parse.quote_plus(query)
-        url = f"https://duckduckgo.com/html/?q={encoded}"
-        try:
-            html = _fetch_text(url, max_chars=25_000)
-        except Exception as exc:  # noqa: BLE001
-            return f"web_search failed: {exc}"
-        lines = [line.strip() for line in html.split(" Result ") if line.strip()]
-        results = []
-        for line in lines:
-            results.append(line[:500])
-            if len(results) >= max(1, min(max_results, 10)):
-                break
-        if not results:
-            return "No search results extracted."
-        return "\n\n".join(f"[{idx}] {item}" for idx, item in enumerate(results, start=1))
+        queries = query if isinstance(query, list) else [query]
+        outputs: list[str] = []
+        per_query = max(1, min(num, 10))
+        for single_query in queries:
+            blocked = _blocked_by_constraints(single_query, constraints)
+            if blocked:
+                outputs.append(f"### Search Query: {single_query}\n{blocked}")
+                continue
+            encoded = urllib.parse.quote_plus(single_query)
+            offset = max(start, 0)
+            url = f"https://duckduckgo.com/html/?q={encoded}&s={offset}"
+            try:
+                html = _fetch_raw(url)
+            except Exception as exc:  # noqa: BLE001
+                outputs.append(f"### Search Query: {single_query}\nError: {exc}")
+                continue
+            results = _extract_duckduckgo_results(html, per_query)
+            blocked_patterns = (constraints or {}).get("blocked_search_patterns", {})
+            filtered_results, filtered_count = filter_blocked_result_items(results, blocked_patterns)
+            warning = (
+                "WARNING: search results referencing blocked resources were filtered out.\n\n"
+                if filtered_count > 0
+                else ""
+            )
+            if not filtered_results:
+                message = "No search results remain after blacklist filtering." if filtered_count > 0 else "No search results extracted."
+                outputs.append(f"### Search Query: {single_query}\n{warning}{message}")
+            else:
+                outputs.append(
+                    f"### Search Query: {single_query}\n"
+                    f"{warning}"
+                    f"{json.dumps(filtered_results, ensure_ascii=False, indent=2)}"
+                )
+        return "\n\n".join(outputs)
 
     def get_tool_schema(self) -> dict[str, Any]:
         return {
@@ -88,8 +151,22 @@ class WebSearchTool(Tool):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
-                        "max_results": {"type": "integer"},
+                        "query": {
+                            "description": "The search keyword(s) to look up.",
+                            "anyOf": [
+                                {"type": "string", "description": "A single search query."},
+                                {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "A list of search queries.",
+                                },
+                            ],
+                        },
+                        "num": {
+                            "type": "integer",
+                            "description": "Number of results to return. Defaults to 10.",
+                            "default": 10,
+                        },
                     },
                     "required": ["query"],
                     "additionalProperties": False,
@@ -112,20 +189,25 @@ class LinkSummaryTool(Tool):
         self,
         shell,  # noqa: ARG002
         url: str,
-        focus: str = "",
+        goal: str = "",
         constraints: dict[str, Any] | None = None,
+        focus: str = "",
         **kwargs: Any,  # noqa: ARG002
     ) -> str:
         blocked = _blocked_by_constraints(url, constraints)
         if blocked:
-            return blocked
+            return f"{BLOCKED_CONTENT_MARKER} {blocked}"
+        blocked_patterns = (constraints or {}).get("blocked_search_patterns", {})
+        if is_url_blocked(url, blocked_patterns):
+            return f"{BLOCKED_CONTENT_MARKER} URL matches blocked_search_patterns."
         try:
             text = _fetch_text(url)
         except Exception as exc:  # noqa: BLE001
             return f"link_summary failed: {exc}"
+        instruction = goal or focus
         summary_lines = [f"URL: {url}"]
-        if focus:
-            summary_lines.append(f"Focus: {focus}")
+        if instruction:
+            summary_lines.append(f"Goal: {instruction}")
         summary_lines.extend(
             [
                 "",
@@ -145,113 +227,13 @@ class LinkSummaryTool(Tool):
                     "type": "object",
                     "properties": {
                         "url": {"type": "string"},
-                        "focus": {"type": "string"},
+                        "goal": {"type": "string"},
                     },
-                    "required": ["url"],
+                    "required": ["url", "goal"],
                     "additionalProperties": False,
                 },
             },
         }
-
-
-class GithubTool(Tool):
-    def name(self) -> str:
-        return "github"
-
-    def supports_constraints(self) -> bool:
-        return True
-
-    def execute_with_constraints(self, shell, constraints: dict[str, Any] | None = None, **kwargs) -> str:
-        return self.execute(shell, constraints=constraints, **kwargs)
-
-    def execute(
-        self,
-        shell,  # noqa: ARG002
-        action: str,
-        query: str = "",
-        repo: str = "",
-        path: str = "",
-        ref: str = "HEAD",
-        max_results: int = 5,
-        constraints: dict[str, Any] | None = None,
-        **kwargs: Any,  # noqa: ARG002
-    ) -> str:
-        token = os.environ.get("GITHUB_TOKEN")
-        if not token:
-            return "github tool unavailable: GITHUB_TOKEN is not set."
-        candidate = " ".join(part for part in [query, repo, path] if part)
-        blocked = _blocked_by_constraints(candidate, constraints)
-        if blocked:
-            return blocked
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        try:
-            if action == "search_repositories":
-                payload = self._get_json(
-                    f"https://api.github.com/search/repositories?q={urllib.parse.quote_plus(query)}&per_page={max(1, min(max_results, 10))}",
-                    headers=headers,
-                )
-                items = payload.get("items", [])
-                return "\n".join(
-                    f"- {item['full_name']}: {item.get('description') or ''}".strip()
-                    for item in items
-                ) or "No repositories found."
-            if action == "search_code":
-                payload = self._get_json(
-                    f"https://api.github.com/search/code?q={urllib.parse.quote_plus(query)}&per_page={max(1, min(max_results, 10))}",
-                    headers=headers,
-                )
-                items = payload.get("items", [])
-                return "\n".join(
-                    f"- {item['repository']['full_name']}:{item['path']}"
-                    for item in items
-                ) or "No code matches found."
-            if action == "read_file":
-                payload = self._get_json(
-                    f"https://api.github.com/repos/{repo}/contents/{path}?ref={urllib.parse.quote_plus(ref)}",
-                    headers=headers,
-                )
-                if payload.get("encoding") == "base64":
-                    data = base64.b64decode(payload.get("content", "")).decode("utf-8", errors="replace")
-                    return data[:12_000]
-                return json.dumps(payload, indent=2)[:12_000]
-        except Exception as exc:  # noqa: BLE001
-            return f"github tool failed: {exc}"
-        return "Unsupported github action. Use search_repositories, search_code, or read_file."
-
-    def get_tool_schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": "github",
-                "description": "Search GitHub repositories/code or fetch a file from a repository when GITHUB_TOKEN is available.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["search_repositories", "search_code", "read_file"],
-                        },
-                        "query": {"type": "string"},
-                        "repo": {"type": "string"},
-                        "path": {"type": "string"},
-                        "ref": {"type": "string"},
-                        "max_results": {"type": "integer"},
-                    },
-                    "required": ["action"],
-                    "additionalProperties": False,
-                },
-            },
-        }
-
-    @staticmethod
-    def _get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
-        request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
-            return json.loads(response.read().decode("utf-8"))
 
 
 class LinterTool(Tool):

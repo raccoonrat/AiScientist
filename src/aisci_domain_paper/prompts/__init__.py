@@ -8,12 +8,9 @@ from aisci_domain_paper.prompts.templates import (
     GENERAL_SYSTEM_PROMPT,
     IMPLEMENTATION_SYSTEM_PROMPT,
     MAIN_AGENT_SYSTEM_PROMPT,
-    PAPER_READER_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT,
     PRIORITIZATION_SYSTEM_PROMPT,
     RESOURCE_DOWNLOAD_SYSTEM_PROMPT,
-    SEARCH_EXECUTOR_PROMPT,
-    SEARCH_STRATEGIST_PROMPT,
     STRUCTURE_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
     render_experiment_system_prompt,
@@ -21,14 +18,9 @@ from aisci_domain_paper.prompts.templates import (
     render_general_system_prompt,
     render_implementation_system_prompt,
     render_main_agent_system_prompt,
-    render_paper_reader_system_prompt,
     render_plan_system_prompt,
     render_prioritization_system_prompt,
 )
-
-
-def load_paper_system_prompt() -> str:
-    return render_main_agent_system_prompt()
 
 
 __all__ = [
@@ -41,21 +33,16 @@ __all__ = [
     "GENERAL_SYSTEM_PROMPT",
     "IMPLEMENTATION_SYSTEM_PROMPT",
     "MAIN_AGENT_SYSTEM_PROMPT",
-    "PAPER_READER_SYSTEM_PROMPT",
     "PLAN_SYSTEM_PROMPT",
     "PRIORITIZATION_SYSTEM_PROMPT",
     "RESOURCE_DOWNLOAD_SYSTEM_PROMPT",
-    "SEARCH_EXECUTOR_PROMPT",
-    "SEARCH_STRATEGIST_PROMPT",
     "STRUCTURE_SYSTEM_PROMPT",
     "SYNTHESIS_SYSTEM_PROMPT",
-    "load_paper_system_prompt",
     "render_experiment_system_prompt",
     "render_explore_system_prompt",
     "render_general_system_prompt",
     "render_implementation_system_prompt",
     "render_main_agent_system_prompt",
-    "render_paper_reader_system_prompt",
     "render_plan_system_prompt",
     "render_prioritization_system_prompt",
 ]

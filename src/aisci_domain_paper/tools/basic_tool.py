@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from aisci_agent_runtime.tools.base import SubagentCompleteSignal, Tool
-from aisci_agent_runtime.tools.research_tools import GithubTool, LinkSummaryTool, LinterTool, WebSearchTool
+from aisci_agent_runtime.tools.research_tools import LinkSummaryTool, LinterTool, WebSearchTool
 from aisci_agent_runtime.tools.shell_tools import (
     AddExpLogTool,
     AddImplLogTool,
@@ -207,17 +207,6 @@ class SubmitTool(Tool):
         }
 
 
-class FinishRunTool(SubmitTool):
-    def name(self) -> str:
-        return "finish_run"
-
-    def get_tool_schema(self) -> dict[str, Any]:
-        schema = super().get_tool_schema()
-        schema["function"]["name"] = "finish_run"
-        schema["function"]["description"] = "Compatibility alias for submit(). Prefer submit()."
-        return schema
-
-
 class PlanWriteTool(Tool):
     PATH = Path("/home/agent/plan.md")
 
@@ -245,76 +234,189 @@ class PlanWriteTool(Tool):
 
 
 class ParseRubricTool(Tool):
-    PATH = Path("/home/paper/rubric.json")
-
     def name(self) -> str:
         return "parse_rubric"
 
-    def execute(self, shell, **kwargs: Any) -> str:  # noqa: ARG002
-        if not self.PATH.exists():
-            return "No rubric.json staged."
+    def execute(
+        self,
+        shell,
+        rubric_path: str = "/home/paper/rubric.json",
+        max_depth: int = 3,
+        **kwargs: Any,  # noqa: ARG002
+    ) -> str:
+        if not shell.file_exists(rubric_path):
+            return f"Error reading rubric: {rubric_path} does not exist. The rubric may not be available."
         try:
-            payload = json.loads(self.PATH.read_text(encoding="utf-8"))
+            payload = json.loads(shell.read_file(rubric_path))
         except Exception as exc:  # noqa: BLE001
-            return f"Failed to parse rubric.json: {exc}"
-        lines: list[str] = []
-        self._collect(payload, lines, prefix="")
-        return "\n".join(lines[:80]) if lines else "Rubric parsed but no weighted tasks were found."
+            return f"Error reading rubric: {exc}. The rubric may not be available."
+
+        def requirement_text(node: dict[str, Any], fallback: str = "") -> str:
+            return str(
+                node.get("requirements")
+                or node.get("requirement")
+                or node.get("name")
+                or node.get("title")
+                or node.get("description")
+                or fallback
+            ).strip()
+
+        def children_for(node: dict[str, Any]) -> list[dict[str, Any]]:
+            children = node.get("sub_tasks")
+            if isinstance(children, list):
+                return [child for child in children if isinstance(child, dict)]
+            children = node.get("children")
+            if isinstance(children, list):
+                return [child for child in children if isinstance(child, dict)]
+            return []
+
+        def analyze_node(node: dict[str, Any], depth: int = 0, path: str = "") -> list[dict[str, Any]]:
+            children = children_for(node)
+            try:
+                weight = float(node.get("weight", 1))
+            except (TypeError, ValueError):
+                weight = 1.0
+            item = {
+                "id": str(node.get("id", "")),
+                "depth": depth,
+                "path": path,
+                "requirement": requirement_text(node, path)[:200],
+                "weight": weight,
+                "category": str(node.get("task_category") or node.get("finegrained_task_category") or "").strip(),
+                "num_children": len(children),
+                "is_leaf": len(children) == 0,
+            }
+            results = [item]
+            if depth < max_depth:
+                for index, child in enumerate(children):
+                    child_path = f"{path}/{index}" if path else str(index)
+                    results.extend(analyze_node(child, depth + 1, child_path))
+            return results
+
+        def compute_tree_stats(node: dict[str, Any], depth: int = 0) -> dict[str, Any]:
+            children = children_for(node)
+            if not children:
+                return {"max_depth": depth, "total_nodes": 1, "leaf_nodes": 1, "per_level": {depth: 1}}
+            stats = {"max_depth": depth, "total_nodes": 1, "leaf_nodes": 0, "per_level": {depth: 1}}
+            for child in children:
+                child_stats = compute_tree_stats(child, depth + 1)
+                stats["max_depth"] = max(stats["max_depth"], child_stats["max_depth"])
+                stats["total_nodes"] += child_stats["total_nodes"]
+                stats["leaf_nodes"] += child_stats["leaf_nodes"]
+                for level, count in child_stats["per_level"].items():
+                    stats["per_level"][level] = stats["per_level"].get(level, 0) + count
+            return stats
+
+        tree_stats = compute_tree_stats(payload)
+        nodes = analyze_node(payload)
+        if not nodes:
+            return "Rubric parsed but no weighted tasks were found."
+
+        weights = [node["weight"] for node in nodes if node["weight"]]
+        avg_weight = sum(weights) / len(weights) if weights else 1.0
+        max_weight = max(weights) if weights else 1.0
+
+        lines = [
+            "# Rubric Analysis",
+            "",
+            f"**Total visible nodes** (depth ≤ {max_depth}): {len(nodes)}",
+            f"**Average weight**: {avg_weight:.2f}",
+            f"**Max weight**: {max_weight:g}",
+            "",
+            "## Top-Level Tasks (by weight)",
+            "",
+        ]
+
+        for node in sorted(nodes, key=lambda item: (-item["weight"], item["depth"]))[:15]:
+            indent = "  " * int(node["depth"])
+            weight = float(node["weight"])
+            if weight >= 2 * avg_weight:
+                indicator = "🔴"
+            elif weight >= avg_weight:
+                indicator = "🟡"
+            else:
+                indicator = "⚪"
+            category = f"[{node['category']}]" if node["category"] else ""
+            children = f"({node['num_children']} sub-tasks)" if node["num_children"] > 0 else "(leaf)"
+            lines.append(f"{indent}{indicator} **W={weight:g}** {category} {children}".rstrip())
+            requirement = str(node["requirement"]).strip() or "(no requirement text)"
+            lines.append(f"{indent}   {requirement[:150]}...")
+            lines.append("")
+
+        categories: dict[str, int] = {}
+        for node in nodes:
+            category = str(node["category"]).strip() or "Unspecified"
+            categories[category] = categories.get(category, 0) + 1
+
+        lines.append("## Category Distribution")
+        for category, count in sorted(categories.items(), key=lambda item: (-item[1], item[0])):
+            lines.append(f"- {category}: {count}")
+
+        lines.extend(
+            [
+                "",
+                "## Weight Thresholds for Priority",
+                f"- P0 threshold (≥2x avg): weight ≥ {2 * avg_weight:.1f}",
+                f"- P1 threshold (≥avg): weight ≥ {avg_weight:.1f}",
+                f"- P2/P3: weight < {avg_weight:.1f}",
+                "",
+                "## Tree Statistics",
+                f"- Total nodes (full tree): {tree_stats['total_nodes']}",
+                f"- Leaf nodes: {tree_stats['leaf_nodes']}",
+                f"- Max depth: {tree_stats['max_depth']}",
+            ]
+        )
+        for level, count in sorted(tree_stats["per_level"].items()):
+            lines.append(f"- Level {level}: {count} nodes")
+
+        return "\n".join(lines).strip()
 
     def get_tool_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
                 "name": "parse_rubric",
-                "description": "Parse /home/paper/rubric.json into a concise task and weight summary.",
+                "description": "Parse rubric.json and extract visible tasks, weights, categories, and tree statistics.",
                 "parameters": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "rubric_path": {
+                            "type": "string",
+                            "description": "Path to rubric.json",
+                            "default": "/home/paper/rubric.json",
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "How deep to traverse the rubric tree.",
+                            "default": 3,
+                        },
+                    },
                     "additionalProperties": False,
                 },
             },
         }
 
-    def _collect(self, value: Any, lines: list[str], prefix: str) -> None:
-        if isinstance(value, dict):
-            name = value.get("name") or value.get("title") or prefix
-            weight = value.get("weight")
-            if name:
-                suffix = f" (weight={weight})" if weight is not None else ""
-                lines.append(f"- {name}{suffix}")
-            for key, nested in value.items():
-                if key in {"name", "title", "weight", "description"}:
-                    continue
-                self._collect(nested, lines, key)
-        elif isinstance(value, list):
-            for item in value:
-                self._collect(item, lines, prefix)
-
 
 class PriorityWriteTool(Tool):
     PRIORITY_PATH = Path("/home/agent/prioritized_tasks.md")
-    PLAN_PATH = Path("/home/agent/plan.md")
 
     def name(self) -> str:
         return "write_priorities"
 
-    def execute(self, shell, content: str, plan_content: str = "", **kwargs: Any) -> str:
+    def execute(self, shell, content: str, **kwargs: Any) -> str:
         shell.write_file(str(self.PRIORITY_PATH), content)
-        if plan_content:
-            shell.write_file(str(self.PLAN_PATH), plan_content)
-        return f"Wrote {self.PRIORITY_PATH}"
+        return f"Prioritized tasks written to {self.PRIORITY_PATH}"
 
     def get_tool_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
                 "name": "write_priorities",
-                "description": "Write the prioritized implementation plan to /home/agent/prioritized_tasks.md and optionally /home/agent/plan.md.",
+                "description": "Write the prioritized implementation plan to /home/agent/prioritized_tasks.md.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "content": {"type": "string"},
-                        "plan_content": {"type": "string"},
                     },
                     "required": ["content"],
                     "additionalProperties": False,
@@ -336,12 +438,6 @@ def build_main_direct_tools(capabilities: dict[str, Any] | None = None) -> list[
     return tools
 
 
-def build_shared_file_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]:
-    tools = build_main_direct_tools(capabilities)
-    tools.append(MappedFileEditTool())
-    return tools
-
-
 def build_reader_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]:
     from aisci_agent_runtime.tools.base import SubagentCompleteTool
 
@@ -356,23 +452,12 @@ def build_reader_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]
     ]
 
 
-def build_search_strategist_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]:
-    from aisci_agent_runtime.tools.base import SubagentCompleteTool
-
-    return [ReadFileChunkTool(), SubagentCompleteTool()]
-
-
-def build_search_executor_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]:
-    from aisci_agent_runtime.tools.base import SubagentCompleteTool
-
-    return [SearchFileTool(), ReadFileChunkTool(), SubagentCompleteTool()]
-
-
 def build_prioritization_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]:
     from aisci_agent_runtime.tools.base import SubagentCompleteTool
 
     return [
-        *build_main_direct_tools(capabilities),
+        ReadFileChunkTool(),
+        SearchFileTool(),
         ParseRubricTool(),
         PriorityWriteTool(),
         SubagentCompleteTool(),
@@ -397,10 +482,6 @@ def build_general_tools(capabilities: dict[str, Any] | None = None) -> list[Tool
     return [*build_main_direct_tools(capabilities), SubagentCompleteTool()]
 
 
-def build_generic_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]:
-    return build_general_tools(capabilities)
-
-
 def build_implementation_tools(capabilities: dict[str, Any] | None = None) -> list[Tool]:
     from aisci_agent_runtime.tools.base import SubagentCompleteTool
 
@@ -416,8 +497,6 @@ def build_implementation_tools(capabilities: dict[str, Any] | None = None) -> li
     ]
     if _capability_enabled(capabilities, "online_research"):
         tools.extend([WebSearchTool(), LinkSummaryTool()])
-    if _capability_enabled(capabilities, "github_research"):
-        tools.append(GithubTool())
     tools.append(SubagentCompleteTool())
     return tools
 

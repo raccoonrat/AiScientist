@@ -14,6 +14,7 @@ from aisci_app.presentation import (
     build_paper_job_spec,
     paper_doctor_report,
 )
+from aisci_core.models import JobStatus
 from aisci_core.paths import ensure_job_dirs, resolve_job_paths
 from aisci_core.store import JobStore
 
@@ -41,6 +42,34 @@ def _get_job_or_exit(job_id: str):
     except KeyError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _emit_job_launch_result(
+    service: JobService,
+    job_id: str,
+    worker_value: int,
+    *,
+    wait: bool,
+    extra: dict[str, object] | None = None,
+) -> None:
+    payload: dict[str, object] = {"job_id": job_id, **(extra or {})}
+    if not wait:
+        payload.update({"worker": worker_value, "status": "started"})
+        _print_json(payload)
+        return
+
+    job = service.store.get_job(job_id)
+    payload.update(
+        {
+            "worker_exit_code": worker_value,
+            "status": job.status.value,
+            "phase": job.phase.value,
+            "error": job.error,
+        }
+    )
+    _print_json(payload)
+    if worker_value != 0 or job.status != JobStatus.SUCCEEDED:
+        raise typer.Exit(code=1)
 
 
 def _print_file_tail(label: str, path: Path, lines: int) -> bool:
@@ -134,8 +163,9 @@ def run_paper(
         run_final_validation=run_final_validation,
     )
     job = service.create_job(spec)
-    worker_value = service.spawn_worker(job.id, wait=not detach)
-    _print_json({"job_id": job.id, "worker": worker_value, "status": "started"})
+    wait = not detach
+    worker_value = service.spawn_worker(job.id, wait=wait)
+    _emit_job_launch_result(service, job.id, worker_value, wait=wait)
 
 
 @paper_app.command("doctor")
@@ -161,15 +191,14 @@ def paper_validate(
     spec = build_job_spec_clone(job, objective_suffix=" [self-check]", run_final_validation=True)
     service = JobService()
     new_job = service.create_job(spec)
-    worker_value = service.spawn_worker(new_job.id, wait=not detach)
-    _print_json(
-        {
-            "source_job_id": job_id,
-            "job_id": new_job.id,
-            "worker": worker_value,
-            "status": "started",
-            "mode": "self-check",
-        }
+    wait = not detach
+    worker_value = service.spawn_worker(new_job.id, wait=wait)
+    _emit_job_launch_result(
+        service,
+        new_job.id,
+        worker_value,
+        wait=wait,
+        extra={"source_job_id": job_id, "mode": "self-check"},
     )
 
 
@@ -182,15 +211,14 @@ def paper_resume(
     spec = build_job_spec_clone(job, objective_suffix=" [resumed]")
     service = JobService()
     new_job = service.create_job(spec)
-    worker_value = service.spawn_worker(new_job.id, wait=not detach)
-    _print_json(
-        {
-            "source_job_id": job_id,
-            "job_id": new_job.id,
-            "worker": worker_value,
-            "status": "started",
-            "mode": "resume",
-        }
+    wait = not detach
+    worker_value = service.spawn_worker(new_job.id, wait=wait)
+    _emit_job_launch_result(
+        service,
+        new_job.id,
+        worker_value,
+        wait=wait,
+        extra={"source_job_id": job_id, "mode": "resume"},
     )
 
 
@@ -230,8 +258,9 @@ def run_mle(
         run_final_validation=run_final_validation,
     )
     job = service.create_job(spec)
-    worker_value = service.spawn_worker(job.id, wait=not detach)
-    _print_json({"job_id": job.id, "worker": worker_value, "status": "started"})
+    wait = not detach
+    worker_value = service.spawn_worker(job.id, wait=wait)
+    _emit_job_launch_result(service, job.id, worker_value, wait=wait)
 
 
 @jobs_app.command("list")
