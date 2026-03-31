@@ -1,0 +1,390 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from aisci_agent_runtime.llm_profiles import resolve_llm_profile
+from aisci_core.models import JobRecord, JobSpec, JobType, MLESpec, PaperSpec, RuntimeProfile, WorkspaceLayout
+from aisci_core.paths import repo_root, resolve_job_paths
+
+
+@dataclass(frozen=True)
+class PaperDoctorCheck:
+    name: str
+    status: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class PaperLogTarget:
+    label: str
+    path: str
+    exists: bool
+    kind: str
+
+
+@dataclass(frozen=True)
+class PaperArtifactHint:
+    label: str
+    path: str
+    exists: bool
+    purpose: str
+
+
+def _job_root(job: JobRecord) -> Path:
+    return resolve_job_paths(job.id).root
+
+
+def _paper_paths(job: JobRecord) -> dict[str, Path]:
+    job_paths = resolve_job_paths(job.id)
+    return {
+        "root": job_paths.root,
+        "workspace": job_paths.workspace_dir,
+        "logs": job_paths.logs_dir,
+        "artifacts": job_paths.artifacts_dir,
+        "analysis": job_paths.workspace_dir / "agent" / "paper_analysis",
+        "submission": job_paths.workspace_dir / "submission",
+    }
+
+
+def paper_capability_flags(job: JobRecord) -> dict[str, str]:
+    if job.job_type != JobType.PAPER:
+        return {}
+    assert isinstance(job.mode_spec, PaperSpec)
+    runtime = job.runtime_profile
+    return {
+        "online_research": "enabled" if job.mode_spec.enable_online_research else "disabled",
+        "github_research": "enabled" if job.mode_spec.enable_github_research else "disabled",
+        "final_self_check": "enabled" if runtime.run_final_validation else "disabled",
+        "validation_strategy": runtime.validation_strategy.value,
+        "workspace_layout": runtime.workspace_layout.value if runtime.workspace_layout else "paper",
+        "dockerfile": runtime.dockerfile_path or "default",
+    }
+
+
+def paper_log_targets(job: JobRecord) -> list[PaperLogTarget]:
+    if job.job_type != JobType.PAPER:
+        return []
+    paths = _paper_paths(job)
+    logs_dir = paths["logs"]
+    subagent_dir = logs_dir / "subagent_logs"
+    candidates = [
+        ("main job log", logs_dir / "job.log", "main"),
+        ("worker log", logs_dir / "worker.log", "main"),
+        ("conversation log", logs_dir / "conversation.jsonl", "conversation"),
+        ("agent log", logs_dir / "agent.log", "agent"),
+        ("subagent logs", subagent_dir, "subagent"),
+        ("validation report", paths["artifacts"] / "validation_report.json", "validation"),
+        ("self-check report", paths["workspace"] / "agent" / "final_self_check.md", "validation"),
+    ]
+    return [PaperLogTarget(label, str(path), path.exists(), kind) for label, path, kind in candidates]
+
+
+def paper_artifact_hints(job: JobRecord) -> list[PaperArtifactHint]:
+    if job.job_type != JobType.PAPER:
+        return []
+    paths = _paper_paths(job)
+    analysis = paths["analysis"]
+    submission = paths["submission"]
+    candidates = [
+        ("paper summary", analysis / "summary.md", "Read this first to understand the paper."),
+        ("paper structure", analysis / "structure.md", "Section map and line numbers."),
+        ("paper algorithm", analysis / "algorithm.md", "Core method and implementation details."),
+        ("paper experiments", analysis / "experiments.md", "Dataset, metrics, and experiment plan."),
+        ("paper baseline", analysis / "baseline.md", "Baseline methods and comparison set."),
+        ("prioritized tasks", paths["workspace"] / "agent" / "prioritized_tasks.md", "Ranked implementation plan."),
+        ("implementation log", paths["workspace"] / "agent" / "impl_log.md", "Changelog for code changes."),
+        ("experiment log", paths["workspace"] / "agent" / "exp_log.md", "Experiment history and results."),
+        ("capability report", paths["workspace"] / "agent" / "capabilities.json", "Resolved online research and validation capabilities."),
+        ("self-check report", paths["workspace"] / "agent" / "final_self_check.md", "Latest clean reproducibility report."),
+        ("reproduce script", submission / "reproduce.sh", "Entry point for local and final self-check."),
+    ]
+    return [PaperArtifactHint(label, str(path), path.exists(), purpose) for label, path, purpose in candidates]
+
+
+def build_job_spec_clone(
+    job: JobRecord,
+    *,
+    objective_suffix: str = "",
+    run_final_validation: bool | None = None,
+) -> JobSpec:
+    runtime = job.runtime_profile.model_copy(deep=True)
+    if run_final_validation is not None:
+        runtime.run_final_validation = run_final_validation
+    mode_spec = job.mode_spec.model_copy(deep=True)
+    if job.job_type == JobType.PAPER:
+        assert isinstance(mode_spec, PaperSpec)
+    else:
+        assert isinstance(mode_spec, MLESpec)
+    return JobSpec(
+        job_type=job.job_type,
+        objective=(job.objective + objective_suffix).strip(),
+        llm_profile=job.llm_profile,
+        runtime_profile=runtime,
+        mode_spec=mode_spec,
+    )
+
+
+def build_paper_job_spec(
+    *,
+    pdf_path: str | None,
+    paper_bundle_zip: str | None,
+    paper_md_path: str | None,
+    llm_profile: str,
+    gpus: int,
+    time_limit: str,
+    inputs_zip: str | None,
+    rubric_path: str | None,
+    blacklist_path: str | None,
+    addendum_path: str | None,
+    seed_repo_zip: str | None,
+    supporting_materials: list[str],
+    dockerfile: str | None,
+    run_final_validation: bool,
+    enable_online_research: bool = True,
+    enable_github_research: bool = True,
+    objective: str = "paper reproduction job",
+) -> JobSpec:
+    runtime = RuntimeProfile(
+        gpu_count=gpus,
+        time_limit=time_limit,
+        dockerfile_path=dockerfile,
+        run_final_validation=run_final_validation,
+        workspace_layout=WorkspaceLayout.PAPER,
+    )
+    return JobSpec(
+        job_type=JobType.PAPER,
+        objective=objective,
+        llm_profile=llm_profile,
+        runtime_profile=runtime,
+        mode_spec=PaperSpec(
+            pdf_path=pdf_path,
+            paper_bundle_zip=paper_bundle_zip,
+            paper_md_path=paper_md_path,
+            context_bundle_zip=inputs_zip,
+            rubric_path=rubric_path,
+            blacklist_path=blacklist_path,
+            addendum_path=addendum_path,
+            supporting_materials=supporting_materials,
+            submission_seed_repo_zip=seed_repo_zip,
+            enable_online_research=enable_online_research,
+            enable_github_research=enable_github_research,
+        ),
+    )
+
+
+def build_mle_job_spec(
+    *,
+    workspace_zip: str | None,
+    competition_bundle_zip: str | None,
+    data_dir: str | None,
+    code_repo_zip: str | None,
+    description_path: str | None,
+    sample_submission_path: str | None,
+    validation_command: str | None,
+    grading_config_path: str | None,
+    metric_direction: str | None,
+    llm_profile: str,
+    gpus: int,
+    time_limit: str,
+    dockerfile: str | None,
+    run_final_validation: bool,
+    objective: str = "mle optimization job",
+) -> JobSpec:
+    runtime = RuntimeProfile(
+        gpu_count=gpus,
+        time_limit=time_limit,
+        dockerfile_path=dockerfile,
+        run_final_validation=run_final_validation,
+        workspace_layout=WorkspaceLayout.MLE,
+    )
+    return JobSpec(
+        job_type=JobType.MLE,
+        objective=objective,
+        llm_profile=llm_profile,
+        runtime_profile=runtime,
+        mode_spec=MLESpec(
+            workspace_bundle_zip=workspace_zip,
+            competition_bundle_zip=competition_bundle_zip,
+            data_dir=data_dir,
+            code_repo_zip=code_repo_zip,
+            description_path=description_path,
+            sample_submission_path=sample_submission_path,
+            validation_command=validation_command,
+            grading_config_path=grading_config_path,
+            metric_direction=metric_direction,
+        ),
+    )
+
+
+def list_text_tree(root: Path, *, max_depth: int = 4, max_entries: int = 250) -> list[dict[str, Any]]:
+    root = root.resolve()
+    nodes: list[dict[str, Any]] = []
+    count = 0
+    if not root.exists():
+        return nodes
+
+    def walk(path: Path, depth: int) -> None:
+        nonlocal count
+        if count >= max_entries or depth > max_depth:
+            return
+        rel = "." if path == root else str(path.relative_to(root))
+        nodes.append(
+            {
+                "name": path.name or root.name,
+                "relative_path": rel,
+                "depth": depth,
+                "is_dir": path.is_dir(),
+                "size": path.stat().st_size if path.is_file() else None,
+            }
+        )
+        count += 1
+        if path.is_dir():
+            children = sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+            for child in children:
+                walk(child, depth + 1)
+
+    walk(root, 0)
+    return nodes
+
+
+def read_text_preview(path: Path, *, max_chars: int = 12000) -> dict[str, Any]:
+    path = path.resolve()
+    if not path.exists():
+        return {"path": str(path), "exists": False, "kind": "missing", "content": ""}
+    if path.is_dir():
+        return {"path": str(path), "exists": True, "kind": "directory", "content": ""}
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return {
+            "path": str(path),
+            "exists": True,
+            "kind": "pdf",
+            "content": "Binary PDF preview is not embedded. Download the file to inspect it locally.",
+        }
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        return {
+            "path": str(path),
+            "exists": True,
+            "kind": "image",
+            "content": "Binary image preview is not embedded.",
+        }
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n...[truncated]..."
+    return {
+        "path": str(path),
+        "exists": True,
+        "kind": "text",
+        "content": text,
+    }
+
+
+def paper_doctor_report() -> list[PaperDoctorCheck]:
+    checks = [
+        PaperDoctorCheck("repo", "ok" if repo_root().exists() else "fail", f"root={repo_root()}"),
+        PaperDoctorCheck(
+            "app package",
+            "ok" if (repo_root() / "src" / "aisci_app").exists() else "fail",
+            "agent console code is present",
+        ),
+        PaperDoctorCheck(
+            "paper workspace",
+            "ok" if (repo_root() / "src" / "aisci_domain_paper").exists() else "warn",
+            "paper execution path is available",
+        ),
+    ]
+    docker = shutil.which("docker")
+    if docker:
+        try:
+            result = subprocess.run(
+                [docker, "info"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            status = "ok" if result.returncode == 0 else "warn"
+            detail = (
+                "docker daemon reachable"
+                if result.returncode == 0
+                else (result.stderr or result.stdout or "docker info failed")
+            )
+        except Exception as exc:
+            status = "warn"
+            detail = str(exc)
+    else:
+        status = "fail"
+        detail = "docker binary not found"
+    checks.append(PaperDoctorCheck("docker", status, detail))
+    profile_name = os.environ.get("AISCI_PAPER_DOCTOR_PROFILE", "gpt-5.4-responses")
+    profile = resolve_llm_profile(profile_name)
+    checks.append(
+        PaperDoctorCheck(
+            "llm_profile",
+            "ok",
+            f"name={profile_name} provider={profile.provider} model={profile.model} api_mode={profile.api_mode}",
+        )
+    )
+    api_key = any(os.environ.get(name) for name in ("OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"))
+    checks.append(
+        PaperDoctorCheck(
+            "api_key",
+            "ok" if api_key else "warn",
+            "LLM credentials detected" if api_key else "No API key detected in environment",
+        )
+    )
+    checks.append(
+        PaperDoctorCheck(
+            "paper console",
+            "ok",
+            "CLI: aisci paper run / doctor / validate / resume; Web: / and /jobs/<id>.",
+        )
+    )
+    return checks
+
+
+def paper_job_summary(job: JobRecord, validation: dict[str, Any] | None = None) -> dict[str, Any]:
+    job_paths = resolve_job_paths(job.id)
+    workspace_root = job_paths.workspace_dir
+    artifact_paths = []
+    for candidate in (
+        job_paths.artifacts_dir / "validation_report.json",
+        job_paths.logs_dir / "paper_session_state.json",
+        job_paths.logs_dir / "job.log",
+    ):
+        if candidate.exists():
+            artifact_paths.append(str(candidate))
+    return {
+        "id": job.id,
+        "job_type": job.job_type.value,
+        "status": job.status.value,
+        "phase": job.phase.value,
+        "objective": job.objective,
+        "llm_profile": job.llm_profile,
+        "workspace_root": str(workspace_root),
+        "artifacts": artifact_paths,
+        "validation": validation or {},
+        "paper_capabilities": paper_capability_flags(job),
+        "paper_log_targets": [target.__dict__ for target in paper_log_targets(job)],
+        "paper_artifacts": [hint.__dict__ for hint in paper_artifact_hints(job)],
+    }
+
+
+def job_console_summary(job: JobRecord, *, validation: dict[str, Any] | None = None) -> dict[str, Any]:
+    job_paths = resolve_job_paths(job.id)
+    tree_root = job_paths.root
+    summary = paper_job_summary(job, validation=validation)
+    summary["tree"] = list_text_tree(tree_root, max_depth=4, max_entries=300)
+    summary["tree_root"] = str(tree_root)
+    summary["workspace_tree"] = list_text_tree(job_paths.workspace_dir, max_depth=4, max_entries=200)
+    summary["log_tree"] = list_text_tree(job_paths.logs_dir, max_depth=2, max_entries=50)
+    summary["artifact_tree"] = list_text_tree(job_paths.artifacts_dir, max_depth=3, max_entries=150)
+    summary["paper_log_targets"] = paper_log_targets(job)
+    summary["paper_artifacts"] = paper_artifact_hints(job)
+    summary["paper_capabilities"] = paper_capability_flags(job)
+    return summary

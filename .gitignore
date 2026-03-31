@@ -1,0 +1,6 @@
+.venv/
+.pytest_cache/
+.aisci/
+jobs/
+__pycache__/
+*.pyc

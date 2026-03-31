@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from aisci_domain_paper.tools.basic_tool import FinishRunTool, SubmitTool, callback_tool
+from aisci_domain_paper.tools.clean_validation_tool import build_clean_validation_tool
+from aisci_domain_paper.tools.experiment_tool import build_run_experiment_tool
+from aisci_domain_paper.tools.implementation_tool import build_implement_tool
+from aisci_domain_paper.tools.paper_reader_tool import build_read_paper_tool
+from aisci_domain_paper.tools.prioritization_tool import build_prioritize_tasks_tool
+
+
+def build_spawn_subagent_tool(engine):
+    return callback_tool(
+        "spawn_subagent",
+        "Run a focused helper subagent for exploration, planning, implementation support, or validation.",
+        {
+            "type": "object",
+            "properties": {
+                "subagent_type": {
+                    "type": "string",
+                    "enum": [
+                        "explore",
+                        "plan",
+                        "general",
+                        "generic",
+                        "reader",
+                        "prioritization",
+                        "implementation",
+                        "experiment",
+                        "validation",
+                    ],
+                },
+                "task": {"type": "string"},
+                "context": {"type": "string"},
+                "time_budget": {"type": "integer"},
+                "max_steps": {"type": "integer"},
+            },
+            "required": ["subagent_type", "task"],
+            "additionalProperties": False,
+        },
+        lambda shell, subagent_type, task, context="", time_budget=None, max_steps=None: engine.run_named_subagent(
+            subagent_type=subagent_type,
+            objective=task,
+            context=context,
+            max_steps=max_steps,
+            time_limit=time_budget,
+        ),
+    )
+
+
+def build_main_tools(engine):
+    return [
+        build_read_paper_tool(engine),
+        build_prioritize_tasks_tool(engine),
+        build_implement_tool(engine),
+        build_run_experiment_tool(engine),
+        build_spawn_subagent_tool(engine),
+        build_clean_validation_tool(engine),
+        SubmitTool(),
+        FinishRunTool(),
+    ]
+
+
+__all__ = ["build_main_tools", "build_spawn_subagent_tool"]

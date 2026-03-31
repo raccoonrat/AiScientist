@@ -1,0 +1,2 @@
+"""MLE mode domain adapter."""
+
