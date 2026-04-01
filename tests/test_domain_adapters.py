@@ -214,6 +214,8 @@ def test_prepare_image_if_missing_pulls_when_absent(tmp_path: Path, monkeypatch)
 def test_paper_adapter_reuses_same_image_for_main_and_validation(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AISCI_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     _write_llm_config(tmp_path)
     _write_image_config(tmp_path)
     pdf_path = tmp_path / "sample.pdf"
@@ -276,6 +278,39 @@ def test_paper_adapter_reuses_same_image_for_main_and_validation(tmp_path: Path,
     assert started_tags == ["paper-image:123", "paper-image:123"]
     assert len(started_specs) == 2
     assert all(spec.profile.image == "registry.example/aisci-paper:latest" for spec in started_specs)
+    assert all(dict(spec.env)["HTTP_PROXY"] == "http://proxy.example:3128" for spec in started_specs)
+    assert all(dict(spec.env)["HF_TOKEN"] == "hf_test_token" for spec in started_specs)
+
+
+def test_paper_adapter_only_forwards_optional_runtime_envs_when_present(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AISCI_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    for key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "HF_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HF_TOKEN", "hf_secondary")
+    _write_llm_config(tmp_path)
+    _write_image_config(tmp_path)
+    pdf_path = tmp_path / "sample.pdf"
+    _make_pdf(pdf_path)
+    adapter = PaperDomainAdapter(DockerRuntimeManager())
+
+    forwarded = adapter._sandbox_env(_paper_job(tmp_path, pdf_path))
+
+    assert forwarded["AISCI_JOB_ID"] == "paper-job"
+    assert forwarded["AISCI_OBJECTIVE"] == "paper objective"
+    assert forwarded["LOGS_DIR"] == "/home/logs"
+    assert forwarded["HTTPS_PROXY"] == "http://proxy.example:3128"
+    assert forwarded["HF_TOKEN"] == "hf_secondary"
+    assert "HTTP_PROXY" not in forwarded
 
 
 def test_paper_adapter_requires_docker(tmp_path: Path, monkeypatch) -> None:

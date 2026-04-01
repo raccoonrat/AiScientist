@@ -23,6 +23,16 @@ from aisci_runtime_docker.profiles import default_paper_profile
 from aisci_runtime_docker.runtime import DockerRuntimeError, DockerRuntimeManager
 from aisci_runtime_docker.shell_interface import DockerShellInterface
 
+OPTIONAL_SANDBOX_ENV_VARS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "HF_TOKEN",
+)
+
 
 class PaperDomainAdapter:
     def __init__(self, runtime: DockerRuntimeManager):
@@ -184,11 +194,21 @@ class PaperDomainAdapter:
         )
 
     def _sandbox_env(self, job: JobRecord) -> dict[str, str]:
-        return {
+        env = {
             "AISCI_JOB_ID": job.id,
             "AISCI_OBJECTIVE": job.objective,
             "LOGS_DIR": "/home/logs",
         }
+        env.update(self._optional_sandbox_env())
+        return env
+
+    def _optional_sandbox_env(self) -> dict[str, str]:
+        forwarded: dict[str, str] = {}
+        for key in OPTIONAL_SANDBOX_ENV_VARS:
+            value = os.environ.get(key)
+            if value:
+                forwarded[key] = value
+        return forwarded
 
     def _write_resolved_llm_config(self, job_paths, profile, enable_online_research: bool) -> None:
         backend_values = backend_env_values(profile)
@@ -230,6 +250,7 @@ class PaperDomainAdapter:
 
     def _write_session_info(self, job_paths, session, llm_profile: str, *, kept_on_failure: bool = False) -> None:
         inspect_summary = self.runtime.inspect_session(session)
+        forwarded_env = self._optional_sandbox_env()
         payload = {
             "container_name": session.container_name,
             "image_ref": session.image_tag,
@@ -241,6 +262,7 @@ class PaperDomainAdapter:
             "llm_profile": llm_profile,
             "kept_on_failure": kept_on_failure,
             "labels": {key: value for key, value in session.labels},
+            "forwarded_env": {key: {"present": True} for key in sorted(forwarded_env)},
             "mounts": [
                 {
                     "source": str(mount.source),
@@ -339,6 +361,7 @@ class PaperDomainAdapter:
                 job.runtime_profile,
                 layout=WorkspaceLayout.PAPER,
                 workdir="/home/submission",
+                env=self._sandbox_env(job),
             )
             return self.runtime.run_validation(
                 spec,
