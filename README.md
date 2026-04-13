@@ -92,11 +92,15 @@ File-as-Bus is the core coordination protocol. Instead of compressing progress i
 </tr>
 </table>
 
-<p align="center"><em>From paper markdown to long-horizon execution.</em></p>
+---
+
+<p align="center"><em>A short look at AiScientist in motion.</em></p>
 
 https://github.com/user-attachments/assets/4356691b-eeb5-4766-a50b-29ddbc48ef9b
 
 <p align="center"><em>Hierarchical orchestration, File-as-Bus coordination, and durable workspace state in one run.</em></p>
+
+---
 
 ## ⚙️ How It Works
 
