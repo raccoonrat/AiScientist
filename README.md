@@ -35,8 +35,8 @@
 
 ## 📰 News
 
-- `2026-04-15`: Initial public release of AiScientist.
-- `2026-04-15`: The public README now reflects the `File-as-Bus` thesis, hierarchical research team design, and long-horizon paper/MLE workflows.
+- `2026-04-13`: Initial public release of AiScientist.
+- `2026-04-13`: The public README now reflects the `File-as-Bus` thesis, hierarchical research team design, and long-horizon paper/MLE workflows.
 - Future updates will include benchmarks, release notes, and project milestones.
 
 ## 🔬 What AiScientist Is
