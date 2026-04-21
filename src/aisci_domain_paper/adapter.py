@@ -26,9 +26,11 @@ from aisci_runtime_docker.shell_interface import DockerShellInterface
 OPTIONAL_SANDBOX_ENV_VARS = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
+    "ALL_PROXY",
     "NO_PROXY",
     "http_proxy",
     "https_proxy",
+    "all_proxy",
     "no_proxy",
     "HF_TOKEN",
 )

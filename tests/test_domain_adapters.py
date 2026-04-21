@@ -342,9 +342,11 @@ def test_paper_adapter_only_forwards_optional_runtime_envs_when_present(tmp_path
     for key in (
         "HTTP_PROXY",
         "HTTPS_PROXY",
+        "ALL_PROXY",
         "NO_PROXY",
         "http_proxy",
         "https_proxy",
+        "all_proxy",
         "no_proxy",
         "HF_TOKEN",
     ):

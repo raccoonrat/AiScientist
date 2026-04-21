@@ -64,3 +64,11 @@ profiles:
       effort: high
     sampling:
       temperature: 1.0
+
+  openrouter-gpt-5-2:
+    backend: openai
+    model: openai/gpt-5.2
+    api: completions
+    limits:
+      max_completion_tokens: 8192
+      context_window: 128000

@@ -1,7 +1,7 @@
-FROM hub.byted.org/ubuntu:24.04
+FROM ubuntu:24.04
 
-# Mirrors: ByteDance internal pip (primary), PyPI (fallback)
-RUN mkdir -p /etc/pip && printf '[global]\nindex-url = https://bytedpypi.byted.org/simple/\nextra-index-url = https://pypi.org/simple/\ntrusted-host = bytedpypi.byted.org\n' > /etc/pip.conf
+# Default PyPI (replace with internal mirrors if you build inside a private network).
+RUN mkdir -p /etc/pip && printf '[global]\nindex-url = https://pypi.org/simple/\n' > /etc/pip.conf
 
 ENV HF_HUB_ETAG_TIMEOUT=120
 ENV HF_HUB_DOWNLOAD_TIMEOUT=600
