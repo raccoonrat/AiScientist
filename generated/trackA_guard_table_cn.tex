@@ -1,0 +1,15 @@
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\columnwidth}{@{}lccc@{}}
+\toprule
+\textbf{GW} & \textbf{FPR$_{\mathrm{benign}}$ (on/off/$\Delta$)} & \textbf{RSR$_{\mathrm{harm}}$ (on/off/$\Delta$)} & \textbf{mean-$F_1$$_{\mathrm{extract}}$ (on/off/$\Delta$)} \\
+\midrule
+structured\_wrap & 0.0000/0.0000/0.0000 & 1.0000/1.0000/0.0000 & 0.4346/0.4346/0.0000 \\
+unified & 0.0000/0.0000/0.0000 & 1.0000/1.0000/0.0000 & 0.4346/0.4346/0.0000 \\
+\bottomrule
+\end{tabularx}
+\caption{\textbf{Table 6：输出守卫（OG）消融（USENIX 友好压缩版，本次复现切片）。}仅展示最关键的效用/安全/抽取三项指标；配置：dcbf=v2-proxy-ensemble，judge=heuristic。}
+\label{tab:tracka-guard-cn}
+\end{table}
+

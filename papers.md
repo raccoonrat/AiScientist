@@ -599,20 +599,34 @@ Table 4: **Metrics Contract**（压缩版）。主文以联合目标而非单一
 
 
 
-|     |
-| --- | --- |
-|     |     |
-
-| 防御基线（**X-Gateway-Experiment-Mode**） 有害 **RSR** 良性误拒 | **in-the-wild RSR** | 备注  |
+| 防御基线（**X-Gateway-Experiment-Mode**） | 有害 **RSR** / 良性误拒（FPR） | **in-the-wild RSR** | 备注 |
 | --- | --- | --- | --- |
-| direct_upstream — | —   | —   | 占位  |
-| unified — （运行 export_trackA_table_latex.py 填入实证数据） | —   | —   | 占位  |
+| direct_upstream | 1.0000 / 0.0000 | 1.0000 | dcbf=v2-proxy-ensemble; judge=heuristic; OG=on（来自 `results/trackA_main_table.tex`） |
+| intent_only | 1.0000 / 0.0000 | 1.0000 | 同上 |
+| intent_only_plus | 1.0000 / 0.0000 | 1.0000 | 同上 |
+| no_decoy | 1.0000 / 0.0000 | 1.0000 | 同上 |
+| single_guard_only | 1.0000 / 0.0000 | 1.0000 | 同上 |
+| strong_system_guard | 1.0000 / 0.0000 | 1.0000 | 同上 |
+| structured_wrap | 1.0000 / 0.0000 | 1.0000 | 同上 |
+| structured_wrap_plus | 1.0000 / 0.0000 | 1.0000 | 同上 |
+| unified | 1.0000 / 0.0000 | 1.0000 | 同上 |
 
 Table 5: **Track A** 生产对齐主结果（占位）。在 Track A（黑盒 API）下，联合报告有害集 RSR、良性误拒与 in-the- wild RSR（主文按联合目标阅读，见 §5.10）。完整数值由 paper-eval-5 的制品 JSON 在固定提示文件版本/哈希与 随机种子下导出并替换本表；误差与统计规则按 §5.8 报告。Track B 上界结果不得与本表混排或混读。 
 
-变体 说明
+变体说明
 
- -variant guard 输出守卫消融（占位） Table 6: **Track A** 输出守卫消融表（占位）。仅在 Track A 评估合同下报告；完整表格由评测脚本从制 品 JSON 导出后替换。本表用于诊断输出守卫对安 全—效用权衡的影响，主文结论仍以表 5 的联合目标 为准；Track B 上界结果不得与 Track A 表格混排或混 读。 
+- `-variant guard`：输出守卫消融（Table 6）。本次运行切片（`dcbf=v2-proxy-ensemble; judge=heuristic`）导出的表格如下（来自 `results/table6_output_guard.tex`）：
+
+| GW | Dataset | Metric | OG=on | OG=off | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| structured_wrap | trackA_benign | FPR | 0.0000 | 0.0000 | 0.0000 |
+| structured_wrap | trackA_extract | mean-F1 | 0.4346 | 0.4346 | 0.0000 |
+| structured_wrap | trackA_harmful | RSR | 1.0000 | 1.0000 | 0.0000 |
+| unified | trackA_benign | FPR | 0.0000 | 0.0000 | 0.0000 |
+| unified | trackA_extract | mean-F1 | 0.4346 | 0.4346 | 0.0000 |
+| unified | trackA_harmful | RSR | 1.0000 | 1.0000 | 0.0000 |
+
+Table 6: **Track A** 输出守卫消融表（实证切片）。仅在 Track A 评估合同下报告；完整表格由评测脚本从制品 JSON 导出后替换。本表用于诊断输出守卫对安全—效用权衡的影响，主文结论仍以表 5 的联合目标为准；Track B 上界结果不得与 Track A 表格混排或混读。
 
 
 

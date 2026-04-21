@@ -1,0 +1,22 @@
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\columnwidth}{@{}lccc@{}}
+\toprule
+\textbf{GW} & \textbf{RSR$_{\mathrm{harm}}$} & \textbf{FPR$_{\mathrm{benign}}$} & \textbf{RSR$_{\mathrm{itw}}$} \\
+\midrule
+direct\_upstream & 1.0000 & 0.0000 & 1.0000 \\
+intent\_only & 1.0000 & 0.0000 & 1.0000 \\
+intent\_only\_plus & 1.0000 & 0.0000 & 1.0000 \\
+no\_decoy & 1.0000 & 0.0000 & 1.0000 \\
+single\_guard\_only & 1.0000 & 0.0000 & 1.0000 \\
+strong\_system\_guard & 1.0000 & 0.0000 & 1.0000 \\
+structured\_wrap & 1.0000 & 0.0000 & 1.0000 \\
+structured\_wrap\_plus & 1.0000 & 0.0000 & 1.0000 \\
+unified & 1.0000 & 0.0000 & 1.0000 \\
+\bottomrule
+\end{tabularx}
+\caption{\textbf{Track A 主表（USENIX 友好压缩版，本次复现切片）。}为适配双栏版式，仅展示主读法所需三列：有害集拒绝成功率 RSR、良性误拒率 FPR、in-the-wild RSR。该切片配置：dcbf=v2-proxy-ensemble，judge=heuristic，OG=on。完整逐数据集/逐指标切片见制品导出表。}
+\label{tab:tracka-main-cn}
+\end{table}
+
