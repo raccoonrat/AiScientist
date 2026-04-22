@@ -6,6 +6,7 @@
 .aisci/
 .codex
 jobs/
+.trackA_matrix_run/
 examples/output/
 __pycache__/
 *.pyc
